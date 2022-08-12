@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess, os, sys
 import json
 import logging
+import argparse
 import itertools
 from itertools import zip_longest
 import re
@@ -67,80 +68,6 @@ def format_table(
 
     return output
 # end gist block
-
-import argparse
-parser = argparse.ArgumentParser(
-    description = """
-A utility for inspecting docker-compose stacks against their source image
-hashes and tags, and determining what needs updates.
-"""
-)
-
-parser.add_argument("-d", "--delay", type=int, help="delay in seconds between container inspections")
-parser.add_argument("-f", "--failure-delay", metavar="DELAY", type=int, default=500,
-                    help="delay after encountering a docker rate limit [500s]")
-parser.add_argument("-m", "--max-attempts", metavar="N", type=int, default=1, help="Fail after this many errors")
-parser.add_argument("-v", "--verbose", action="count", default=0, help="more logging (or -vv, etc)")
-parser.add_argument("-q", "--quiet", action="count", default=0, help="less logging")
-# this is storing as an array, not sure why and not sure it's worth figuring out
-parser.add_argument("-c", "--repo-credentials", metavar="PATH", nargs=1, help="""
-                        a file containing credentials for use with `docker
-                        login` in the format of `user:password` (only the first
-                        line will be read)""")
-
-parser.add_argument("-o", "--only", metavar="ID", action='append', nargs="*",
-                    help="restrict tool to only these container ids")
-
-parser.add_argument("--table", metavar="PATH", nargs='?', const=STDOUT,
-                    help="output results as table, to either STDOUT or a provided path")
-parser.add_argument("--table-max-width", metavar="N", nargs=1, default=50,
-                    help="max width of table columns [50]")
-parser.add_argument("--json", metavar="PATH", nargs='?', const=STDOUT, default=False,
-                    help="output results as json, to either STDOUT or a provided path")
-args = parser.parse_args()
-
-# verify that some output is requested
-if not (args.json or args.table):
-    print("Error: no output requested. Use at least one of --table, --json", file=sys.stderr)
-    parser.print_help(sys.stderr)
-    exit(1)
-
-
-# verify dependencies
-missing_dependencies = []
-if subprocess.run(["docker", "info"], capture_output=True).returncode > 0:
-    missing_dependencies.append("Error: docker not installed or missing permissions")
-if subprocess.run(["skopeo", "--version"], capture_output=True).returncode > 0:
-    missing_dependencies.append("Error: skopeo not installed")
-if len(missing_dependencies):
-    [print(m, file=sys.stderr) for m in missing_dependencies]
-    exit(1)
-
-
-logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s', level=(max(3-(args.verbose-args.quiet), 0) * 10))
-log = logging.getLogger(__name__)
-
-if args.repo_credentials:
-    log.debug("Authenticating with docker hub...")
-    with open(args.repo_credentials[0], 'r') as f:
-        (user, password) = f.readline().strip().split(":", 2)
-        if not user and password:
-            print("Error: Couldn't read credentials from %s" % args.repo_credentials[0], file=sys.stderr)
-            exit(1)
-
-    login = subprocess.run(["docker", "login", "-u", user, "-p", password], capture_output=True)
-    if login.returncode > 0:
-        print("Error: Couldn't log into docker hub using provided credentials")
-        exit(1)
-    log.debug("Authenticated")
-
-if args.only:
-    container_hashes = list(itertools.chain(*args.only))
-else:
-    log.info("Getting list of running containers...")
-    container_hashes = subprocess.check_output(
-        ["docker", "ps", "-q"], text=True
-    ).strip().split("\n")
 
 @dataclass
 class Container:
@@ -254,189 +181,265 @@ def version_string_to_semver_tuple(version):
     return None
 
 
-containers: List[Container] = []
-hashes_by_config = {}
-
-# this will be used to extract a structure out of docker inspect
-inspect_templates = {
-    "labels": ".Config.Labels",
-    "name": ".Name",
-    "image": ".Config.Image",
-    "image_hash": ".Image"
-}
-
-image_inspect_templates = {
-    "repo_digests": ".RepoDigests",
-}
-
-compose_labels = [
-    "config-hash",
-    "project",
-    "project.config_files",
-    "container-number",
-    "service",
-    "project.working_dir",
-]
-
-
-
-# outer loop for retrying
-for attempt in range(args.max_attempts):
-
-    already_seen = list(map(lambda x: x.container_hash, containers))
-    to_inspect = [c for c in container_hashes if c not in already_seen]
-
-    # short circuit if we're done
-    if not to_inspect:
-        break
-
-    log.info("Inspecting %d running containers" % len(to_inspect))
-    if len(already_seen):
-        log.info("Skipping %d containers from previous efforts" % len(already_seen))
-
-    for container_hash in to_inspect:
-        inspect_res = run_get_json(
-            ["docker", "inspect", container_hash, "-f", go_formatstr(inspect_templates, "json")],
-        )
-        extracted_labels = {}
-
-        image_inspect_res = run_get_json(
-            ["docker", "image", "inspect", "-f", go_formatstr(image_inspect_templates, "json"), inspect_res['image_hash'],]
-        )
-
-        # this may fail due to docker rate-limiting
-        skopeo_cmd = ["skopeo", "inspect", "docker://%s" % inspect_res['image']]
-        try:
-            skopeo_inspect_res = run_get_json(skopeo_cmd)
-        except subprocess.CalledProcessError:
-            extra_failure_str = " (failure %d of %d)" % (attempt+1, args.max_attempts) if args.max_attempts > 1 else ""
-            log.warning("skopeo failure: `%s`%s" % (" ".join(skopeo_cmd), extra_failure_str))
-            if attempt+1 < args.max_attempts:
-                log.info(f"Pausing {args.failure_delay}s after rate limit failure...")
-                time.sleep(args.failure_delay)
-            break
-
-        for l in compose_labels:
-            labelname = "com.docker.compose.%s" % l
-            extracted_labels[l] = inspect_res['labels'].get(labelname)
-
-        try:
-            repo_digest = image_inspect_res['repo_digests'][0].rsplit("@", 2)[1]
-        except:
-            repo_digest = None
-
-        remote_repo_digest = skopeo_inspect_res.get('Digest')
-
-        sorted_tags = sorted([
-            r for r in ({
-                'raw': x,
-                'parsed': version_string_to_semver_tuple(x)
-            } for x in skopeo_inspect_res['RepoTags'])
-            if r['parsed']
-        ],
-            key=lambda x: (x['parsed'], len(x['raw'])),
-            reverse = True
-        )
-
-        try:
-            biggest_tag = sorted_tags[0]['raw']
-        except:
-            biggest_tag = None
-
-
-
-        # collect info about local image vs running image
-        config = extracted_labels.get("project.config_files")
-        try:
-            working_dir = Path(extracted_labels["project.working_dir"])
-        except:
-            working_dir = None
-        service = extracted_labels.get("service")
-
-        if config and config not in hashes_by_config:
-            compose_files = config_to_compose_files(config, working_dir)
-            compose_hashes = dict(
-                h.split(" ", 2) for h in subprocess.check_output(
-                    ["docker-compose"] + compose_files + ["config", "--hash=*"], text=True
-                ).strip().split("\n")
-            )
-            hashes_by_config[config] = compose_hashes
-        else:
-            compose_hashes = hashes_by_config[config]
-
-        compose_hash = compose_hashes.get(service)
-
-        try:
-            container_num = int(extracted_labels["container-number"]),
-        except:
-            container_num = None
-
-        c = Container(
-            container_hash,
-            inspect_res['name'],
-            extracted_labels.get("config-hash"),
-            compose_hash,
-            extracted_labels.get("project"),
-            config,
-            container_num,
-            service,
-            working_dir,
-            inspect_res['image'],
-            inspect_res['image_hash'],
-            repo_digest,
-            remote_repo_digest,
-            biggest_tag,
-        )
-        containers.append(c)
-        log.info("Processed %s (%s)" % (c.container_name, c.image_hash))
-        if args.delay and len(containers) < len(container_hashes):
-            log.info(f"Pausing {args.delay}s for per-record delay...")
-            time.sleep(args.delay)
-
-#### OUTPUT
-log.info("Forming output...")
-sorted_containers = sorted(containers, key=lambda x: (x.project, x.service, x.container_name))
-
-tbl = [[] for _ in Container.headers()]
-jsonout = []
-
-# had trouble consuming this list more than once... ugly but whatever
-for c in sorted_containers:
-    # this table generator gist is column-oriented
-    if args.table:
-        [tbl[i].append(str(v)) for (i,v) in enumerate(c.as_table_row)]
-    if args.json:
-        jsonout.append(c.as_output_dict)
-
-if args.table:
-    tbl_str = format_table(
-        tbl,
-        headers=Container.headers(),
-        max_width=args.table_max_width,
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description = """
+    A utility for inspecting docker-compose stacks against their source image
+    hashes and tags, and determining what needs updates.
+    """
     )
 
-    if args.table == STDOUT:
-        log.debug("Writing table to STDOUT")
-        print(tbl_str)
+    parser.add_argument("-d", "--delay", type=int, help="delay in seconds between container inspections")
+    parser.add_argument("-f", "--failure-delay", metavar="DELAY", type=int, default=500,
+                        help="delay after encountering a docker rate limit [500s]")
+    parser.add_argument("-m", "--max-attempts", metavar="N", type=int, default=1, help="Fail after this many errors")
+    parser.add_argument("-v", "--verbose", action="count", default=0, help="more logging (or -vv, etc)")
+    parser.add_argument("-q", "--quiet", action="count", default=0, help="less logging")
+    # this is storing as an array, not sure why and not sure it's worth figuring out
+    parser.add_argument("-c", "--repo-credentials", metavar="PATH", nargs=1, help="""
+                            a file containing credentials for use with `docker
+                            login` in the format of `user:password` (only the first
+                            line will be read)""")
+
+    parser.add_argument("-o", "--only", metavar="ID", action='append', nargs="*",
+                        help="restrict tool to only these container ids")
+
+    parser.add_argument("--table", metavar="PATH", nargs='?', const=STDOUT,
+                        help="output results as table, to either STDOUT or a provided path")
+    parser.add_argument("--table-max-width", metavar="N", nargs=1, default=50,
+                        help="max width of table columns [50]")
+    parser.add_argument("--json", metavar="PATH", nargs='?', const=STDOUT, default=False,
+                        help="output results as json, to either STDOUT or a provided path")
+    args = parser.parse_args()
+
+    # verify that some output is requested
+    if not (args.json or args.table):
+        print("Error: no output requested. Use at least one of --table, --json", file=sys.stderr)
+        parser.print_help(sys.stderr)
+        exit(1)
+
+
+    # verify dependencies
+    missing_dependencies = []
+    if subprocess.run(["docker", "info"], capture_output=True).returncode > 0:
+        missing_dependencies.append("Error: docker not installed or missing permissions")
+    if subprocess.run(["docker-compose", "--version"], capture_output=True).returncode > 0:
+        missing_dependencies.append("Error: docker-compose not installed")
+    if subprocess.run(["skopeo", "--version"], capture_output=True).returncode > 0:
+        missing_dependencies.append("Error: skopeo not installed")
+    if len(missing_dependencies):
+        [print(m, file=sys.stderr) for m in missing_dependencies]
+        exit(1)
+
+
+    logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s', level=(max(3-(args.verbose-args.quiet), 0) * 10))
+    log = logging.getLogger(__name__)
+
+    if args.repo_credentials:
+        log.debug("Authenticating with docker hub...")
+        with open(args.repo_credentials[0], 'r') as f:
+            (user, password) = f.readline().strip().split(":", 2)
+            if not user and password:
+                print("Error: Couldn't read credentials from %s" % args.repo_credentials[0], file=sys.stderr)
+                exit(1)
+
+        login = subprocess.run(["docker", "login", "-u", user, "-p", password], capture_output=True)
+        if login.returncode > 0:
+            print("Error: Couldn't log into docker hub using provided credentials")
+            exit(1)
+        log.debug("Authenticated")
+
+    if args.only:
+        container_hashes = list(itertools.chain(*args.only))
     else:
-        log.debug("Writing table to %s" % args.table)
-        with open(args.table, 'w') as f:
-            f.write(tbl_str)
-else:
-    log.debug("Skipping table output")
+        log.info("Getting list of running containers...")
+        container_hashes = subprocess.check_output(
+            ["docker", "ps", "-q"], text=True
+        ).strip().split("\n")
 
-if args.json:
-    json_strs = [json.dumps(s) for s in jsonout]
+    containers: List[Container] = []
+    hashes_by_config = {}
 
-    if args.json == STDOUT:
-        log.debug("Writing json to STDOUT")
-        [print(s) for s in json_strs]
+    # this will be used to extract a structure out of docker inspect
+    inspect_templates = {
+        "labels": ".Config.Labels",
+        "name": ".Name",
+        "image": ".Config.Image",
+        "image_hash": ".Image"
+    }
+
+    image_inspect_templates = {
+        "repo_digests": ".RepoDigests",
+    }
+
+    compose_labels = [
+        "config-hash",
+        "project",
+        "project.config_files",
+        "container-number",
+        "service",
+        "project.working_dir",
+    ]
+
+
+
+    # outer loop for retrying
+    for attempt in range(args.max_attempts):
+
+        already_seen = list(map(lambda x: x.container_hash, containers))
+        to_inspect = [c for c in container_hashes if c not in already_seen]
+
+        # short circuit if we're done
+        if not to_inspect:
+            break
+
+        log.info("Inspecting %d running containers" % len(to_inspect))
+        if len(already_seen):
+            log.info("Skipping %d containers from previous efforts" % len(already_seen))
+
+        for container_hash in to_inspect:
+            inspect_res = run_get_json(
+                ["docker", "inspect", container_hash, "-f", go_formatstr(inspect_templates, "json")],
+            )
+            extracted_labels = {}
+
+            image_inspect_res = run_get_json(
+                ["docker", "image", "inspect", "-f", go_formatstr(image_inspect_templates, "json"), inspect_res['image_hash'],]
+            )
+
+            # this may fail due to docker rate-limiting
+            skopeo_cmd = ["skopeo", "inspect", "docker://%s" % inspect_res['image']]
+            try:
+                skopeo_inspect_res = run_get_json(skopeo_cmd)
+            except subprocess.CalledProcessError:
+                extra_failure_str = " (failure %d of %d)" % (attempt+1, args.max_attempts) if args.max_attempts > 1 else ""
+                log.warning("skopeo failure: `%s`%s" % (" ".join(skopeo_cmd), extra_failure_str))
+                if attempt+1 < args.max_attempts:
+                    log.info(f"Pausing {args.failure_delay}s after rate limit failure...")
+                    time.sleep(args.failure_delay)
+                break
+
+            for l in compose_labels:
+                labelname = "com.docker.compose.%s" % l
+                extracted_labels[l] = inspect_res['labels'].get(labelname)
+
+            try:
+                repo_digest = image_inspect_res['repo_digests'][0].rsplit("@", 2)[1]
+            except:
+                repo_digest = None
+
+            remote_repo_digest = skopeo_inspect_res.get('Digest')
+
+            sorted_tags = sorted([
+                r for r in ({
+                    'raw': x,
+                    'parsed': version_string_to_semver_tuple(x)
+                } for x in skopeo_inspect_res['RepoTags'])
+                if r['parsed']
+            ],
+                key=lambda x: (x['parsed'], len(x['raw'])),
+                reverse = True
+            )
+
+            try:
+                biggest_tag = sorted_tags[0]['raw']
+            except:
+                biggest_tag = None
+
+
+
+            # collect info about local image vs running image
+            config = extracted_labels.get("project.config_files")
+            try:
+                working_dir = Path(extracted_labels["project.working_dir"])
+            except:
+                working_dir = None
+            service = extracted_labels.get("service")
+
+            if config and config not in hashes_by_config:
+                compose_files = config_to_compose_files(config, working_dir)
+                compose_hashes = dict(
+                    h.split(" ", 2) for h in subprocess.check_output(
+                        ["docker-compose"] + compose_files + ["config", "--hash=*"], text=True
+                    ).strip().split("\n")
+                )
+                hashes_by_config[config] = compose_hashes
+            else:
+                compose_hashes = hashes_by_config[config]
+
+            compose_hash = compose_hashes.get(service)
+
+            try:
+                container_num = int(extracted_labels["container-number"]),
+            except:
+                container_num = None
+
+            c = Container(
+                container_hash,
+                inspect_res['name'],
+                extracted_labels.get("config-hash"),
+                compose_hash,
+                extracted_labels.get("project"),
+                config,
+                container_num,
+                service,
+                working_dir,
+                inspect_res['image'],
+                inspect_res['image_hash'],
+                repo_digest,
+                remote_repo_digest,
+                biggest_tag,
+            )
+            containers.append(c)
+            log.info("Processed %s (%s)" % (c.container_name, c.image_hash))
+            if args.delay and len(containers) < len(container_hashes):
+                log.info(f"Pausing {args.delay}s for per-record delay...")
+                time.sleep(args.delay)
+
+    #### OUTPUT
+    log.info("Forming output...")
+    sorted_containers = sorted(containers, key=lambda x: (x.project, x.service, x.container_name))
+
+    tbl = [[] for _ in Container.headers()]
+    jsonout = []
+
+    # had trouble consuming this list more than once... ugly but whatever
+    for c in sorted_containers:
+        # this table generator gist is column-oriented
+        if args.table:
+            [tbl[i].append(str(v)) for (i,v) in enumerate(c.as_table_row)]
+        if args.json:
+            jsonout.append(c.as_output_dict)
+
+    if args.table:
+        tbl_str = format_table(
+            tbl,
+            headers=Container.headers(),
+            max_width=args.table_max_width,
+        )
+
+        if args.table == STDOUT:
+            log.debug("Writing table to STDOUT")
+            print(tbl_str)
+        else:
+            log.debug("Writing table to %s" % args.table)
+            with open(args.table, 'w') as f:
+                f.write(tbl_str)
     else:
-        log.debug("Writing json to %s" % args.json)
-        with open(args.json, 'w') as f:
-            [f.write(s) for s in json_strs]
-else:
-    log.debug("Skipping json output")
+        log.debug("Skipping table output")
 
-log.info("Done.")
+    if args.json:
+        json_strs = [json.dumps(s) for s in jsonout]
+
+        if args.json == STDOUT:
+            log.debug("Writing json to STDOUT")
+            [print(s) for s in json_strs]
+        else:
+            log.debug("Writing json to %s" % args.json)
+            with open(args.json, 'w') as f:
+                [f.write(s) for s in json_strs]
+    else:
+        log.debug("Skipping json output")
+
+    log.info("Done.")
 

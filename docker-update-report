@@ -177,7 +177,17 @@ def version_string_to_semver_tuple(version):
     res = semver_regex.search(version)
     if res:
         (a,b,c,d) = res.groups()
-        return (a if a else '0' , b if b else '0', c if c else '0', d if d else 'zzzzzzzzzzz')
+        try:
+            # cast to int so numeric comparison works, also treat missing tag
+            # numbers as 0
+            #  7.0 -> 7.0.0
+            a = int(a) if a else 0
+            b = int(b) if b else 0
+            c = int(c) if c else 0
+        except:
+            return None
+
+        return (a, b, c, d if d else 'zzzzzzzzzzz')
     return None
 
 

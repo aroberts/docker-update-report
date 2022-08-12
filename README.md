@@ -40,9 +40,12 @@ APIs.
 
 ## Usage
 ```
-usage: docker-update-report [-h] [-d DELAY] [-f DELAY] [-m N] [-v] [-q] [-c PATH] [--table [PATH]] [--table-max-width N] [--json [PATH]]
+usage: docker-update-report [-h] [-d DELAY] [-f DELAY] [-m N] [-v] [-q]
+                            [-c PATH] [-o [ID ...]] [--table [PATH]]
+                            [--table-max-width N] [--json [PATH]]
 
-A utility for inspecting docker-compose stacks against their source image hashes and tags, and determining what needs updates.
+A utility for inspecting docker-compose stacks against their source image
+hashes and tags, and determining what needs updates.
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -55,10 +58,16 @@ optional arguments:
   -v, --verbose         more logging (or -vv, etc)
   -q, --quiet           less logging
   -c PATH, --repo-credentials PATH
-                        a file containing credentials for use with `docker login` in the format of `user:password` (only the first line will be read)
-  --table [PATH]        output results as table, to either STDOUT or a provided path
+                        a file containing credentials for use with `docker
+                        login` in the format of `user:password` (only the
+                        first line will be read)
+  -o [ID ...], --only [ID ...]
+                        restrict tool to only these container ids
+  --table [PATH]        output results as table, to either STDOUT or a
+                        provided path
   --table-max-width N   max width of table columns [50]
-  --json [PATH]         output results as json, to either STDOUT or a provided path
+  --json [PATH]         output results as json, to either STDOUT or a provided
+                        path
 ```
 
 Because of the docker-compose dependency, and the way compose information is

@@ -155,6 +155,9 @@ class Container:
 #  if compose file starts with /, then it is absolute
 #  otherwise, it is relative to working_dir
 def config_to_compose_files(config, working_dir):
+    if not (config and working_dir):
+        return []
+
     return list(itertools.chain(*[
         ["-f", x if os.path.isabs(x) else os.path.join(working_dir, x)]
         for x in config.split(",")
@@ -166,8 +169,11 @@ def go_formatstr(input_dict, modifier=None):
     else:
         return "{" + ",".join([ "\"%s\":{{%s}}" % i for i in input_dict.items() ]) + "}"
 
-def run_get_json(argv):
-    return json.loads(subprocess.check_output(argv, text=True).strip())
+def run_get(argv):
+    log.log(5, "Running command: %s" % ' '.join(argv))
+    res = subprocess.check_output(argv, text=True).strip()
+    log.log(5, res)
+    return res
 
 def grouped(iterable, key=None):
     return itertools.groupby(sorted(iterable, key=key), key)
@@ -263,9 +269,7 @@ if __name__ == "__main__":
         container_hashes = list(itertools.chain(*args.only))
     else:
         log.info("Getting list of running containers...")
-        container_hashes = subprocess.check_output(
-            ["docker", "ps", "-q"], text=True
-        ).strip().split("\n")
+        container_hashes = run_get(["docker", "ps", "-q"]).split("\n")
 
     containers: List[Container] = []
     hashes_by_config = {}
@@ -308,19 +312,19 @@ if __name__ == "__main__":
             log.info("Skipping %d containers from previous efforts" % len(already_seen))
 
         for container_hash in to_inspect:
-            inspect_res = run_get_json(
+            inspect_res = json.loads(run_get(
                 ["docker", "inspect", container_hash, "-f", go_formatstr(inspect_templates, "json")],
-            )
+            ))
             extracted_labels = {}
 
-            image_inspect_res = run_get_json(
+            image_inspect_res = json.loads(run_get(
                 ["docker", "image", "inspect", "-f", go_formatstr(image_inspect_templates, "json"), inspect_res['image_hash'],]
-            )
+            ))
 
             # this may fail due to docker rate-limiting
             skopeo_cmd = ["skopeo", "inspect", "docker://%s" % inspect_res['image']]
             try:
-                skopeo_inspect_res = run_get_json(skopeo_cmd)
+                skopeo_inspect_res = json.loads(run_get(skopeo_cmd))/
             except subprocess.CalledProcessError:
                 extra_failure_str = " (failure %d of %d)" % (attempt+1, args.max_attempts) if args.max_attempts > 1 else ""
                 log.warning("skopeo failure: `%s`%s" % (" ".join(skopeo_cmd), extra_failure_str))
@@ -328,6 +332,7 @@ if __name__ == "__main__":
                     log.info(f"Pausing {args.failure_delay}s after rate limit failure...")
                     time.sleep(args.failure_delay)
                 break
+            skopeo_inspect_res = {}
 
             for l in compose_labels:
                 labelname = "com.docker.compose.%s" % l
@@ -344,7 +349,7 @@ if __name__ == "__main__":
                 r for r in ({
                     'raw': x,
                     'parsed': version_string_to_semver_tuple(x)
-                } for x in skopeo_inspect_res['RepoTags'])
+                } for x in skopeo_inspect_res.get('RepoTags', []))
                 if r['parsed']
             ],
                 key=lambda x: (x['parsed'], len(x['raw'])),
@@ -356,8 +361,6 @@ if __name__ == "__main__":
             except:
                 biggest_tag = None
 
-
-
             # collect info about local image vs running image
             config = extracted_labels.get("project.config_files")
             try:
@@ -366,18 +369,22 @@ if __name__ == "__main__":
                 working_dir = None
             service = extracted_labels.get("service")
 
-            if config and config not in hashes_by_config:
-                compose_files = config_to_compose_files(config, working_dir)
-                compose_hashes = dict(
-                    h.split(" ", 2) for h in subprocess.check_output(
-                        ["docker-compose"] + compose_files + ["config", "--hash=*"], text=True
-                    ).strip().split("\n")
-                )
-                hashes_by_config[config] = compose_hashes
-            else:
-                compose_hashes = hashes_by_config[config]
+            compose_files = config_to_compose_files(config, working_dir)
+            compose_files_key = ' '.join(compose_files)
+            if compose_files and service:
+                if compose_files_key not in hashes_by_config:
+                    compose_hashes = dict(
+                        h.split(" ", 2) for h in run_get(
+                            ["docker-compose"] + compose_files + ["config", "--hash=*"]
+                        ).split("\n")
+                    )
+                    hashes_by_config[compose_files_key] = compose_hashes
+                else:
+                    compose_hashes = hashes_by_config[compose_files_key]
 
-            compose_hash = compose_hashes.get(service)
+                compose_hash = compose_hashes.get(service)
+            else:
+                compose_hash = None
 
             try:
                 container_num = int(extracted_labels["container-number"]),

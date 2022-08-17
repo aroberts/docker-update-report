@@ -324,7 +324,7 @@ if __name__ == "__main__":
             # this may fail due to docker rate-limiting
             skopeo_cmd = ["skopeo", "inspect", "docker://%s" % inspect_res['image']]
             try:
-                skopeo_inspect_res = json.loads(run_get(skopeo_cmd))/
+                skopeo_inspect_res = json.loads(run_get(skopeo_cmd))
             except subprocess.CalledProcessError:
                 extra_failure_str = " (failure %d of %d)" % (attempt+1, args.max_attempts) if args.max_attempts > 1 else ""
                 log.warning("skopeo failure: `%s`%s" % (" ".join(skopeo_cmd), extra_failure_str))

@@ -332,7 +332,6 @@ if __name__ == "__main__":
                     log.info(f"Pausing {args.failure_delay}s after rate limit failure...")
                     time.sleep(args.failure_delay)
                 break
-            skopeo_inspect_res = {}
 
             for l in compose_labels:
                 labelname = "com.docker.compose.%s" % l

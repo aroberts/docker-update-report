@@ -178,7 +178,7 @@ def run_get(argv):
 def grouped(iterable, key=None):
     return itertools.groupby(sorted(iterable, key=key), key)
 
-semver_regex = re.compile("^\w{0,5}([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+)?")
+semver_regex = re.compile("^v?([0-9]+)\.([0-9]+)(?:\.([0-9]+))?(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+)?")
 def version_string_to_semver_tuple(version):
     res = semver_regex.search(version)
     if res:

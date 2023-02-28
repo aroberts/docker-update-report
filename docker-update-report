@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Utility for checking for new versions of docker containers, in a few
+# Utility for checking for new )versions of docker containers, in a few
 # different ways. Depends on `docker` and `skopeo` executables; no python
 # dependencies.
 
@@ -217,6 +217,11 @@ if __name__ == "__main__":
                             login` in the format of `user:password` (only the first
                             line will be read)""")
 
+    parser.add_argument("-i", "--ignore-prerelease-tags", action="store_true", help="Ignore tags containing prerelease words")
+    parser.add_argument("--prerelease-words", nargs='+', default=["alpha", "beta", "rc"],
+                        help="Define the list of words that indicate a tag is prerelease [alpha, beta, rc]")
+
+
     parser.add_argument("-o", "--only", metavar="ID", action='append', nargs="*",
                         help="restrict tool to only these container ids")
 
@@ -227,6 +232,8 @@ if __name__ == "__main__":
     parser.add_argument("--json", metavar="PATH", nargs='?', const=STDOUT, default=False,
                         help="output results as json, to either STDOUT or a provided path")
     args = parser.parse_args()
+
+    prerelease_regex = re.compile("[^a-zA-Z]*%s[^a-zA-Z]*" % "|".join(args.prerelease_words))
 
     # verify that some output is requested
     if not (args.json or args.table):
@@ -349,7 +356,10 @@ if __name__ == "__main__":
                     'raw': x,
                     'parsed': version_string_to_semver_tuple(x)
                 } for x in skopeo_inspect_res.get('RepoTags', []))
-                if r['parsed']
+                if r['parsed'] and (
+                    not args.ignore_prerelease_tags or
+                    not prerelease_regex.search(r['parsed'][3])
+                )
             ],
                 key=lambda x: (x['parsed'], len(x['raw'])),
                 reverse = True

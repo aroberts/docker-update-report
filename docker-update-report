@@ -170,9 +170,9 @@ def go_formatstr(input_dict, modifier=None):
         return "{" + ",".join([ "\"%s\":{{%s}}" % i for i in input_dict.items() ]) + "}"
 
 def run_get(argv):
-    log.log(5, "Running command: %s" % ' '.join(argv))
+    log.debug("Running command: %s" % ' '.join(argv))
     res = subprocess.check_output(argv, text=True).strip()
-    log.log(5, res)
+    log.debug(res)
     return res
 
 def grouped(iterable, key=None):
@@ -248,7 +248,7 @@ if __name__ == "__main__":
         exit(1)
 
 
-    logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s', level=(max(3-(args.verbose-args.quiet), 0) * 10))
+    logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s', level=(max(3-(args.verbose-args.quiet), 1) * 10))
     log = logging.getLogger(__name__)
 
     if args.repo_credentials:
@@ -354,6 +354,16 @@ if __name__ == "__main__":
                 key=lambda x: (x['parsed'], len(x['raw'])),
                 reverse = True
             )
+
+            if log.getEffectiveLevel() <= logging.DEBUG:
+                [
+                    log.debug("Found remote tag: %s:%s (parsed to %s)" % (
+                        inspect_res['image'],
+                        st['raw'],
+                        st['parsed']
+                    ))
+                    for st in sorted_tags[::-1]
+                ]
 
             try:
                 biggest_tag = sorted_tags[0]['raw']

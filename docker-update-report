@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Utility for checking for new )versions of docker containers, in a few
+# Utility for checking for new versions of docker services, in a few
 # different ways. Depends on `docker` and `skopeo` executables; no python
 # dependencies.
 
@@ -70,21 +70,16 @@ def format_table(
 # end gist block
 
 @dataclass
-class Container:
-    container_hash: str
-    container_name: str
-    config_hash: str
-    compose_hash: str
+class Service:
+    service_hash: str
+    service_name: str
     project: str
-    config: str
-    containernum: int
     service: str
-    work_dir: Path
     image: str
-    image_hash: str
     repo_digest: str
     remote_repo_digest: str
     biggest_tag: str
+    link: str
 
     @staticmethod
     def headers():
@@ -93,40 +88,38 @@ class Container:
             "stack",
             "service",
             "image",
-            "restart",
             "pull",
-            "tag"
+            "tag",
+            "link",
         ]
 
     @property
     def as_table_row(self):
         return [
-            c.container_name,
-            c.project,
-            c.service,
-            c.image,
-            c.has_new_image_pulled,
-            c.has_new_image_for_tag,
-            c.biggest_tag if c.has_new_tag else c.has_new_tag,
+            self.service_name,
+            self.project,
+            self.service,
+            self.image,
+            self.has_new_image_for_tag,
+            self.biggest_tag if self.has_new_tag else self.has_new_tag,
+            self.link
         ]
 
     @property
     def as_output_dict(self):
-        return dict(zip(Container.headers(), self.as_table_row))
-
-    @property
-    def name(self) -> str:
-        return f"{self.project}_{self.service}_{self.containernum}"
+        return dict(zip(Service.headers(), self.as_table_row))
 
     # these properties are deliberately nullable, with null representing an
     # indeterminate state
     @property
     def has_new_tag(self):
         if self.image and self.biggest_tag:
-            remote = version_string_to_semver_tuple(self.biggest_tag)
+            # remote = version_string_to_semver_tuple(self.biggest_tag)
+            remote = self.biggest_tag
             try:
                 tag = self.image.rsplit(":", 2)[1]
-                local = version_string_to_semver_tuple(tag)
+                # local = version_string_to_semver_tuple(tag)
+                local = tag
                 if local:
                     return local != remote
                 else:
@@ -147,22 +140,6 @@ class Container:
     def has_new_image_for_tag(self):
         return self.compare_tags(self.repo_digest, self.remote_repo_digest)
 
-    @property
-    def has_new_image_pulled(self):
-        return self.compare_tags(self.config_hash, self.compose_hash)
-
-
-#  if compose file starts with /, then it is absolute
-#  otherwise, it is relative to working_dir
-def config_to_compose_files(config, working_dir):
-    if not (config and working_dir):
-        return []
-
-    return list(itertools.chain(*[
-        ["-f", x if os.path.isabs(x) else os.path.join(working_dir, x)]
-        for x in config.split(",")
-    ]))
-
 def go_formatstr(input_dict, modifier=None):
     if modifier:
         return "{" + ",".join([ "\"%s\":{{%s %s}}" % (k, modifier, v) for (k,v) in input_dict.items() ]) + "}"
@@ -179,6 +156,7 @@ def grouped(iterable, key=None):
     return itertools.groupby(sorted(iterable, key=key), key)
 
 semver_regex = re.compile("^v?([0-9]+)\.([0-9]+)(?:\.([0-9]+))?(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+)?")
+numbers_regex = re.compile("^[0-9]+$")
 def version_string_to_semver_tuple(version):
     res = semver_regex.search(version)
     if res:
@@ -196,18 +174,60 @@ def version_string_to_semver_tuple(version):
         return (a, b, c, d if d else 'zzzzzzzzzzz')
     return None
 
+def parse_tag(tag, include, exclude, numeric_groups=True):
+    m = None
+    if exclude and exclude.match(tag):
+        return None
+    if include:
+        m = include.match(tag)
+        if not m:
+            return None
+        else:
+            if m.groupdict():
+                parsed = [x[1] for x in sorted(m.groupdict().items())]
+            elif m.groups():
+                parsed = list(m.groups())
+            else:
+                parsed = [tag]
+    else:
+        parsed = [tag]
+
+    if numeric_groups:
+        parsed = [ int(x) if numbers_regex.match(x) else x for x in parsed ]
+    return {
+        'raw': tag,
+        'parsed': parsed,
+        'match': m,
+    }
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description = """
     A utility for inspecting docker-compose stacks against their source image
     hashes and tags, and determining what needs updates.
+
+    This tool can also be controlled with per-service labels:
+        dur.tags.include=<regex>
+            Filter remote tag list down to only tags matching this regex
+        dur.tags.exclude=<regex>
+            Reject remote tags matching this regex
+        dur.tags.parse_numeric=false
+            Turn off numeric parsing of tags (if sorting tags breaks for a container
+        dur.link.template=<replacement>
+            URL to attach to this container's output. If an include regex is
+            used globally or for this container, then replacements provided in this
+            string will be applied according to the capture groups from the newest tag.
+            Use \1, \2, etc for numbered capture groups and \g<name> for named
+            capture groups.
     """
     )
 
-    parser.add_argument("-d", "--delay", type=int, help="delay in seconds between container inspections")
+    parser.add_argument("service_ids", nargs="*",
+                            help="restrict tool to only these service ids")
+
+    parser.add_argument("-d", "--delay", type=int, help="delay in seconds between service inspections")
     parser.add_argument("-f", "--failure-delay", metavar="DELAY", type=int, default=500,
-                        help="delay after encountering a docker rate limit [500s]")
+                            help="delay after encountering a docker rate limit [500s]")
     parser.add_argument("-m", "--max-attempts", metavar="N", type=int, default=1, help="Fail after this many errors")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="more logging (or -vv, etc)")
     parser.add_argument("-q", "--quiet", action="count", default=0, help="less logging")
@@ -217,23 +237,31 @@ if __name__ == "__main__":
                             login` in the format of `user:password` (only the first
                             line will be read)""")
 
-    parser.add_argument("-i", "--ignore-prerelease-tags", action="store_true", help="Ignore tags containing prerelease words")
-    parser.add_argument("--prerelease-words", nargs='+', default=["alpha", "beta", "rc"],
-                        help="Define the list of words that indicate a tag is prerelease [alpha, beta, rc]")
-
-
-    parser.add_argument("-o", "--only", metavar="ID", action='append', nargs="*",
-                        help="restrict tool to only these container ids")
+    parser.add_argument("-i", "--include-tags", metavar="REGEX", help="""
+                            only tags matching this regex will be considered.
+                            This can be overridden per-service with the label
+                            'dur.tags.include'. If this regex has capture
+                            groups, they will be used to sort the tags. If named
+                            capture groups are used, the sort will be in
+                            alphabetical order""")
+    parser.add_argument("-e", "--exclude-tags", metavar="REGEX", help="""
+                            only tags matching this regex will be considered.
+                            This can be overridden per-service with the label
+                            'dur.tags.exclude'""")
+    parser.add_argument("-n", "--no-parse-numerics", action="store_true",
+                            help="don't attempt to parse numeric tag parts")
+    parser.add_argument("-l", "--ignore-labels", action="store_true",
+                            help="ignore container labels, only use command line options")
+    parser.add_argument("-k", "--link-template",
+                            help="template for creating links from tag matches")
 
     parser.add_argument("--table", metavar="PATH", nargs='?', const=STDOUT,
-                        help="output results as table, to either STDOUT or a provided path")
+                            help="output results as table, to either STDOUT or a provided path")
     parser.add_argument("--table-max-width", metavar="N", nargs=1, default=50,
-                        help="max width of table columns [50]")
+                            help="max width of table columns [50]")
     parser.add_argument("--json", metavar="PATH", nargs='?', const=STDOUT, default=False,
-                        help="output results as json, to either STDOUT or a provided path")
+                            help="output results as json, to either STDOUT or a provided path")
     args = parser.parse_args()
-
-    prerelease_regex = re.compile("[^a-zA-Z]*%s[^a-zA-Z]*" % "|".join(args.prerelease_words))
 
     # verify that some output is requested
     if not (args.json or args.table):
@@ -246,8 +274,6 @@ if __name__ == "__main__":
     missing_dependencies = []
     if subprocess.run(["docker", "info"], capture_output=True).returncode > 0:
         missing_dependencies.append("Error: docker not installed or missing permissions")
-    if subprocess.run(["docker-compose", "--version"], capture_output=True).returncode > 0:
-        missing_dependencies.append("Error: docker-compose not installed")
     if subprocess.run(["skopeo", "--version"], capture_output=True).returncode > 0:
         missing_dependencies.append("Error: skopeo not installed")
     if len(missing_dependencies):
@@ -272,64 +298,60 @@ if __name__ == "__main__":
             exit(1)
         log.debug("Authenticated")
 
-    if args.only:
-        container_hashes = list(itertools.chain(*args.only))
+    if args.service_ids:
+        service_hashes = args.service_ids
     else:
-        log.info("Getting list of running containers...")
-        container_hashes = run_get(["docker", "ps", "-q"]).split("\n")
+        log.info("Getting list of running services...")
+        service_hashes = run_get(["docker", "service", "ls", "-q"]).split("\n")
 
-    containers: List[Container] = []
-    hashes_by_config = {}
+    global_include_tags = re.compile(args.include_tags) if args.include_tags else None
+    global_exclude_tags = re.compile(args.exclude_tags) if args.exclude_tags else None
+
+    services: List[Service] = []
 
     # this will be used to extract a structure out of docker inspect
     inspect_templates = {
-        "labels": ".Config.Labels",
-        "name": ".Name",
-        "image": ".Config.Image",
-        "image_hash": ".Image"
+        "id": ".ID",
+        "labels": ".Spec.Labels",
+        "name": ".Spec.Name",
+        # format: <repo-image>:<tag>@<digest-sha>
+        "image_spec": ".Spec.TaskTemplate.ContainerSpec.Image",
     }
 
-    image_inspect_templates = {
-        "repo_digests": ".RepoDigests",
-    }
-
-    compose_labels = [
-        "config-hash",
-        "project",
-        "project.config_files",
-        "container-number",
-        "service",
-        "project.working_dir",
+    stack_labels = [
+        "image",
+        "namespace",
     ]
-
 
 
     # outer loop for retrying
     for attempt in range(args.max_attempts):
 
-        already_seen = list(map(lambda x: x.container_hash, containers))
-        to_inspect = [c for c in container_hashes if c not in already_seen]
+        already_seen = list(map(lambda x: x.service_hash, services))
+        to_inspect = [c for c in service_hashes if c not in already_seen]
 
         # short circuit if we're done
         if not to_inspect:
             break
 
-        log.info("Inspecting %d running containers" % len(to_inspect))
+        log.info("Inspecting %d running services" % len(to_inspect))
         if len(already_seen):
-            log.info("Skipping %d containers from previous efforts" % len(already_seen))
+            log.info("Skipping %d services from previous efforts" % len(already_seen))
 
-        for container_hash in to_inspect:
+        for service_hash in to_inspect:
             inspect_res = json.loads(run_get(
-                ["docker", "inspect", container_hash, "-f", go_formatstr(inspect_templates, "json")],
+                ["docker", "service", "inspect", service_hash, "-f", go_formatstr(inspect_templates, "json")],
             ))
-            extracted_labels = {}
 
-            image_inspect_res = json.loads(run_get(
-                ["docker", "image", "inspect", "-f", go_formatstr(image_inspect_templates, "json"), inspect_res['image_hash'],]
-            ))
+            extracted_labels = {}
+            for l in stack_labels:
+                labelname = "com.docker.stack.%s" % l
+                extracted_labels[l] = inspect_res['labels'].get(labelname)
+
+            image_name = extracted_labels['image'].split(":")[0]
 
             # this may fail due to docker rate-limiting
-            skopeo_cmd = ["skopeo", "inspect", "docker://%s" % inspect_res['image']]
+            skopeo_cmd = ["skopeo", "inspect", "docker://%s" % extracted_labels['image']]
             try:
                 skopeo_inspect_res = json.loads(run_get(skopeo_cmd))
             except subprocess.CalledProcessError:
@@ -340,107 +362,96 @@ if __name__ == "__main__":
                     time.sleep(args.failure_delay)
                 break
 
-            for l in compose_labels:
-                labelname = "com.docker.compose.%s" % l
-                extracted_labels[l] = inspect_res['labels'].get(labelname)
-
             try:
-                repo_digest = image_inspect_res['repo_digests'][0].rsplit("@", 2)[1]
+                repo_digest = inspect_res['image_spec'].split("@")[1]
             except:
                 repo_digest = None
 
             remote_repo_digest = skopeo_inspect_res.get('Digest')
 
-            sorted_tags = sorted([
-                r for r in ({
-                    'raw': x,
-                    'parsed': version_string_to_semver_tuple(x)
-                } for x in skopeo_inspect_res.get('RepoTags', []))
-                if r['parsed'] and (
-                    not args.ignore_prerelease_tags or
-                    not prerelease_regex.search(r['parsed'][3])
+            label_include_tags, label_exclude_tags, label_parse_numeric, label_link_template = (None, None, None, None)
+            if not args.ignore_labels:
+                label_include_tags = inspect_res.get('labels', {}).get("dur.tags.include")
+                label_exclude_tags = inspect_res.get('labels', {}).get("dur.tags.exclude")
+                label_parse_numeric = inspect_res.get('labels', {}).get("dur.tags.parse_numeric") not in ["false", "f", "0", "n", "no"]
+                label_link_template = inspect_res.get('labels', {}).get("dur.link.template")
+
+            link_template = label_link_template if label_link_template else args.link_template
+            parse_numerics = label_parse_numeric if label_parse_numeric is not None else not args.no_parse_numerics
+            log.debug("Numeric parsing enabled: " + str(parse_numerics))
+
+            raw_parsed_tags = [ parse_tag(
+                tag,
+                re.compile(label_include_tags) if label_include_tags else global_include_tags,
+                re.compile(label_exclude_tags) if label_exclude_tags else global_exclude_tags,
+                parse_numerics,
+            ) for tag in skopeo_inspect_res.get('RepoTags', []) ]
+
+            parsed_tags = [ x for x in raw_parsed_tags if x is not None ]
+
+            try:
+                sorted_tags = sorted(
+                    parsed_tags,
+                    key=lambda x: (x['parsed'], len(x['raw'])),
+                    reverse = True
                 )
-            ],
-                key=lambda x: (x['parsed'], len(x['raw'])),
-                reverse = True
-            )
 
-            if log.getEffectiveLevel() <= logging.DEBUG:
-                [
-                    log.debug("Found remote tag: %s:%s (parsed to %s)" % (
-                        inspect_res['image'],
-                        st['raw'],
-                        st['parsed']
-                    ))
-                    for st in sorted_tags[::-1]
-                ]
+                if log.getEffectiveLevel() <= logging.DEBUG:
+                    [
+                        log.debug("Found remote tag: %s:%s (parsed to %s)" % (
+                            image_name,
+                            st['raw'],
+                            repr(st['parsed']),
+                        ))
+                        for st in sorted_tags[::-1]
+                    ]
 
-            try:
-                biggest_tag = sorted_tags[0]['raw']
-            except:
-                biggest_tag = None
-
-            # collect info about local image vs running image
-            config = extracted_labels.get("project.config_files")
-            try:
-                working_dir = Path(extracted_labels["project.working_dir"])
-            except:
-                working_dir = None
-            service = extracted_labels.get("service")
-
-            compose_files = config_to_compose_files(config, working_dir)
-            compose_files_key = ' '.join(compose_files)
-            if compose_files and service:
-                if compose_files_key not in hashes_by_config:
-                    compose_hashes = dict(
-                        h.split(" ", 2) for h in run_get(
-                            ["docker-compose"] + compose_files + ["config", "--hash=*"]
-                        ).split("\n")
-                    )
-                    hashes_by_config[compose_files_key] = compose_hashes
+                biggest_tag = sorted_tags[0]
+                biggest_tag_name = biggest_tag['raw']
+                if link_template:
+                    try:
+                        link = biggest_tag['match'].expand(link_template)
+                    except Exception as e:
+                        log.error("Error rendering link for '%s': %s" % (image_name, str(e)))
+                        link = None
                 else:
-                    compose_hashes = hashes_by_config[compose_files_key]
+                    link = None
+            except Exception as e:
+                log.error("Error sorting remote tags for '%s': %s" % (image_name, str(e)))
+                log.debug("Got these tags:")
+                [ log.debug("  " + repr(x)) for x in parsed_tags ]
+                biggest_tag_name = None
+                link = None
 
-                compose_hash = compose_hashes.get(service)
-            else:
-                compose_hash = None
+            shortname = inspect_res['name'][len(extracted_labels['namespace'])+1:] if 'namespace' in extracted_labels else None
 
-            try:
-                container_num = int(extracted_labels["container-number"]),
-            except:
-                container_num = None
-
-            c = Container(
-                container_hash,
+            c = Service(
+                service_hash,
                 inspect_res['name'],
-                extracted_labels.get("config-hash"),
-                compose_hash,
-                extracted_labels.get("project"),
-                config,
-                container_num,
-                service,
-                working_dir,
-                inspect_res['image'],
-                inspect_res['image_hash'],
+                extracted_labels.get("namespace"),
+                shortname,
+                extracted_labels['image'],
                 repo_digest,
                 remote_repo_digest,
-                biggest_tag,
+                biggest_tag_name,
+                link,
             )
-            containers.append(c)
-            log.info("Processed %s (%s)" % (c.container_name, c.image_hash))
-            if args.delay and len(containers) < len(container_hashes):
+            services.append(c)
+            log.info("Processed %s (%s)" % (c.service_name, c.image))
+
+            if args.delay and len(services) < len(service_hashes):
                 log.info(f"Pausing {args.delay}s for per-record delay...")
                 time.sleep(args.delay)
 
     #### OUTPUT
     log.info("Forming output...")
-    sorted_containers = sorted(containers, key=lambda x: (x.project, x.service, x.container_name))
+    sorted_services = sorted(services, key=lambda x: (x.project, x.service, x.service_name))
 
-    tbl = [[] for _ in Container.headers()]
+    tbl = [[] for _ in Service.headers()]
     jsonout = []
 
     # had trouble consuming this list more than once... ugly but whatever
-    for c in sorted_containers:
+    for c in sorted_services:
         # this table generator gist is column-oriented
         if args.table:
             [tbl[i].append(str(v)) for (i,v) in enumerate(c.as_table_row)]
@@ -450,7 +461,7 @@ if __name__ == "__main__":
     if args.table:
         tbl_str = format_table(
             tbl,
-            headers=Container.headers(),
+            headers=Service.headers(),
             max_width=args.table_max_width,
         )
 

@@ -203,7 +203,7 @@ def parse_tag(tag, include, exclude, numeric_groups=True):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description = """
-    A utility for inspecting docker-compose stacks against their source image
+    A utility for inspecting docker swarm stacks against their source image
     hashes and tags, and determining what needs updates.
 
     This tool can also be controlled with per-service labels:
@@ -217,7 +217,7 @@ if __name__ == "__main__":
             URL to attach to this container's output. If an include regex is
             used globally or for this container, then replacements provided in this
             string will be applied according to the capture groups from the newest tag.
-            Use \1, \2, etc for numbered capture groups and \g<name> for named
+            Use \\1, \\2, etc for numbered capture groups and \g<name> for named
             capture groups.
     """
     )
@@ -252,8 +252,8 @@ if __name__ == "__main__":
                             help="don't attempt to parse numeric tag parts")
     parser.add_argument("-l", "--ignore-labels", action="store_true",
                             help="ignore container labels, only use command line options")
-    parser.add_argument("-k", "--link-template",
-                            help="template for creating links from tag matches")
+    parser.add_argument("-k", "--link-template", metavar="STR",
+                            help="template for creating links from tag matches. Override with container label 'dur.link.template'")
 
     parser.add_argument("--table", metavar="PATH", nargs='?', const=STDOUT,
                             help="output results as table, to either STDOUT or a provided path")

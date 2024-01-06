@@ -39,9 +39,13 @@ def format_table(
     headers: Optional[Sequence[str]] = None,
     justify: Callable[[str, int], str] = str.ljust,
     max_width: int = 20,
+    log = None
 ) -> str:
     if headers is None:
         headers = [""] * len(table)
+
+    if log:
+        log.debug(enumerate(table))
 
     col_lens = [
         min(max_width, max_text_width([headers[i]] + list(col)))
@@ -516,6 +520,7 @@ if __name__ == "__main__":
             tbl,
             headers=Service.headers(),
             max_width=args.table_max_width,
+            log=log
         )
 
         if args.table == STDOUT:

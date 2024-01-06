@@ -80,6 +80,7 @@ class Service:
     remote_repo_digest: str
     biggest_tag: str
     link: str
+    link_for_pull: str
 
     @staticmethod
     def headers():
@@ -102,7 +103,7 @@ class Service:
             self.image,
             self.has_new_image_for_tag,
             self.biggest_tag if self.has_new_tag else self.has_new_tag,
-            self.link
+            self.link if self.has_new_tag else (self.link_for_pull if self.has_new_image_for_tag else None)
         ]
 
     @property
@@ -140,6 +141,7 @@ class Service:
     def has_new_image_for_tag(self):
         return self.compare_tags(self.repo_digest, self.remote_repo_digest)
 
+
 def go_formatstr(input_dict, modifier=None):
     if modifier:
         return "{" + ",".join([ "\"%s\":{{%s %s}}" % (k, modifier, v) for (k,v) in input_dict.items() ]) + "}"
@@ -151,6 +153,7 @@ def run_get(argv):
     res = subprocess.check_output(argv, text=True).strip()
     log.debug(res)
     return res
+
 
 def grouped(iterable, key=None):
     return itertools.groupby(sorted(iterable, key=key), key)
@@ -353,7 +356,8 @@ if __name__ == "__main__":
                 ["docker", "service", "inspect", service_hash, "-f", go_formatstr(inspect_templates, "json")],
             ))
 
-            if not trueish(inspect_res['labels'].get('dur.enabled', "true")):
+            # skip services tagged as not-enabled unless they're explicitly passed in on the cli
+            if not trueish(inspect_res['labels'].get('dur.enabled', "true")) and not service_hash in args.service_ids:
                 log.debug("Skipping disabled service: " + inspect_res['name'])
                 continue
 
@@ -391,13 +395,15 @@ if __name__ == "__main__":
                 label_link_template = inspect_res.get('labels', {}).get("dur.link.template")
 
             link_template = label_link_template if label_link_template else args.link_template
+            include_tags = re.compile(label_include_tags) if label_include_tags else global_include_tags
+            exclude_tags = re.compile(label_exclude_tags) if label_exclude_tags else global_exclude_tags
             parse_numerics = label_parse_numeric if label_parse_numeric is not None else not args.no_parse_numerics
             log.debug("Numeric parsing enabled: " + str(parse_numerics))
 
             raw_parsed_tags = [ parse_tag(
                 tag,
-                re.compile(label_include_tags) if label_include_tags else global_include_tags,
-                re.compile(label_exclude_tags) if label_exclude_tags else global_exclude_tags,
+                include_tags,
+                exclude_tags,
                 parse_numerics,
             ) for tag in skopeo_inspect_res.get('RepoTags', []) ]
 
@@ -431,14 +437,43 @@ if __name__ == "__main__":
                     except Exception as e:
                         log.error("Error rendering link for '%s': %s" % (image_name, str(e)))
                         link = None
+
+                    if include_tags:
+                        try:
+                            link_for_pull = include_tags.sub(link_template, extracted_labels['image'].rsplit(":", 2)[1])
+                        except Exception as e:
+                            log.error("Error rendering pull link for '%s': %s" % (image_name, str(e)))
+                            link_for_pull = link_template
+                    else:
+                        link_for_pull = link_template
                 else:
                     link = None
+                    link_for_pull = None
             except Exception as e:
                 log.error("Error sorting remote tags for '%s': %s" % (image_name, str(e)))
                 log.debug("Got these tags:")
                 [ log.debug("  " + repr(x)) for x in parsed_tags ]
                 biggest_tag_name = None
                 link = None
+                link_for_pull = None
+
+            # make sure we're not getting notice of updates to e.g. 7.0.1 when
+            # already on the latest 7.0 tag
+            if biggest_tag_name:
+                skopeo_cmd = ["skopeo", "inspect", "docker://%s:%s" % (image_name, biggest_tag_name)]
+                try:
+                    skopeo_tag_inspect_res = json.loads(run_get(skopeo_cmd))
+                    biggest_tag_digest = skopeo_tag_inspect_res.get('Digest')
+                    if biggest_tag_digest == repo_digest:
+                        log.info("Saw tag %s for %s - same digest, ignoring..." % (biggest_tag_name, extracted_labels['image']))
+                        biggest_tag_name = None
+                except subprocess.CalledProcessError:
+                    extra_failure_str = " (failure %d of %d)" % (attempt+1, args.max_attempts) if args.max_attempts > 1 else ""
+                    log.warning("skopeo failure: `%s`%s" % (" ".join(skopeo_cmd), extra_failure_str))
+                    if attempt+1 < args.max_attempts:
+                        log.info(f"Pausing {args.failure_delay}s after rate limit failure...")
+                        time.sleep(args.failure_delay)
+                    break
 
             shortname = inspect_res['name'][len(extracted_labels['namespace'])+1:] if 'namespace' in extracted_labels else None
 
@@ -452,6 +487,7 @@ if __name__ == "__main__":
                 remote_repo_digest,
                 biggest_tag_name,
                 link,
+                link_for_pull,
             )
             services.append(c)
             log.info("Processed %s (%s)" % (c.service_name, c.image))

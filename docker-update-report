@@ -381,10 +381,15 @@ if __name__ == "__main__":
                     time.sleep(args.failure_delay)
                 break
 
+            image_spec_parts = inspect_res['image_spec'].split("@")
             try:
-                repo_digest = inspect_res['image_spec'].split("@")[1]
+                repo_digest = image_spec_parts[1]
             except:
                 repo_digest = None
+            try:
+                current_tag = image_spec_parts[0].split(":")[1]
+            except:
+                current_tag = None
 
             remote_repo_digest = skopeo_inspect_res.get('Digest')
 
@@ -441,7 +446,7 @@ if __name__ == "__main__":
 
                     if include_tags:
                         try:
-                            link_for_pull = include_tags.sub(link_template, extracted_labels['image'].rsplit(":", 2)[1])
+                            link_for_pull = include_tags.sub(link_template, current_tag)
                         except Exception as e:
                             log.error("Error rendering pull link for '%s': %s" % (image_name, str(e)))
                             link_for_pull = link_template
@@ -460,7 +465,7 @@ if __name__ == "__main__":
 
             # make sure we're not getting notice of updates to e.g. 7.0.1 when
             # already on the latest 7.0 tag
-            if biggest_tag_name:
+            if biggest_tag_name and biggest_tag_name != current_tag:
                 skopeo_cmd = ["skopeo", "inspect", "docker://%s:%s" % (image_name, biggest_tag_name)]
                 try:
                     skopeo_tag_inspect_res = json.loads(run_get(skopeo_cmd))

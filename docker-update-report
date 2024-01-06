@@ -298,13 +298,6 @@ if __name__ == "__main__":
     logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s', level=(max(3-(args.verbose-args.quiet), 1) * 10))
     log = logging.getLogger(__name__)
 
-    tbl_str = format_table(
-        BUG,
-        headers=Service.headers(),
-        max_width=args.table_max_width,
-    )
-
-
     if args.repo_credentials:
         log.debug("Authenticating with docker hub...")
         with open(args.repo_credentials, 'r') as f:

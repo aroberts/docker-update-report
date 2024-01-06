@@ -517,7 +517,6 @@ if __name__ == "__main__":
             tbl,
             headers=Service.headers(),
             max_width=args.table_max_width,
-            log=log
         )
 
         if args.table == STDOUT:

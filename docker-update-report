@@ -47,6 +47,7 @@ def format_table(
     if log:
         log.info(list(enumerate(table)))
 
+
     col_lens = [
         min(max_width, max_text_width([headers[i]] + list(col)))
         for i, col in enumerate(table)

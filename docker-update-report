@@ -270,7 +270,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--table", metavar="PATH", nargs='?', const=STDOUT,
                             help="output results as table, to either STDOUT or a provided path")
-    parser.add_argument("--table-max-width", metavar="N", default=50,
+    parser.add_argument("--table-max-width", metavar="N", type=int, default=50,
                             help="max width of table columns [50]")
     parser.add_argument("--json", metavar="PATH", nargs='?', const=STDOUT, default=False,
                             help="output results as json, to either STDOUT or a provided path")

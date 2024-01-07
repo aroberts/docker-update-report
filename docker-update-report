@@ -115,16 +115,15 @@ class Service:
     @property
     def has_new_tag(self):
         if self.image and self.biggest_tag:
-            # remote = version_string_to_semver_tuple(self.biggest_tag)
-            remote = self.biggest_tag
             try:
-                tag = self.image.rsplit(":", 2)[1]
-                # local = version_string_to_semver_tuple(tag)
-                local = tag
-                if local:
-                    return local != remote
+                local = self.image.rsplit(":", 2)[1]
+                parsed_remote = version_string_to_semver_tuple(self.biggest_tag)
+                parsed_local = version_string_to_semver_tuple(local)
+                if parsed_remote and parsed_local:
+                    return parsed_remote > parsed_local
                 else:
-                    return None
+                    # hamfisted; parse didn't work so revert to pure lexical
+                    return self.biggest_tag > local
             except:
                 return None
         return None

@@ -23,6 +23,8 @@ from typing import Callable, List, Optional, Sequence
 
 from pprint import pp
 
+from datetime import datetime
+
 # sentinel for comparison only
 STDOUT=object()
 
@@ -81,6 +83,7 @@ class Service:
     biggest_tag: str
     link: str
     link_for_pull: str
+    checked_at: str
 
     @staticmethod
     def headers():
@@ -106,9 +109,14 @@ class Service:
             self.link if self.has_new_tag else (self.link_for_pull if self.has_new_image_for_tag else None)
         ]
 
-    @property
-    def as_output_dict(self):
-        return dict(zip(Service.headers(), self.as_table_row))
+    def as_output_dict(self, include_checked_at):
+        if include_checked_at:
+            return dict(zip(
+                Service.headers() + ["checked_at"],
+                self.as_table_row + [self.checked_at]
+            ))
+        else:
+            return dict(zip(Service.headers(), self.as_table_row))
 
     # these properties are deliberately nullable, with null representing an
     # indeterminate state
@@ -273,6 +281,8 @@ if __name__ == "__main__":
                             help="max width of table columns [50]")
     parser.add_argument("--json", metavar="PATH", nargs='?', const=STDOUT, default=False,
                             help="output results as json, to either STDOUT or a provided path")
+    parser.add_argument("--json-timestamps", action="store_true",
+                            help="add a `checked_at` timestamp field to each row of json output")
     args = parser.parse_args()
 
 
@@ -296,6 +306,8 @@ if __name__ == "__main__":
 
     logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s', level=(max(3-(args.verbose-args.quiet), 1) * 10))
     log = logging.getLogger(__name__)
+
+    checked_at = datetime.now().isoformat()
 
     if args.repo_credentials:
         log.debug("Authenticating with docker hub...")
@@ -493,6 +505,7 @@ if __name__ == "__main__":
                 biggest_tag_name,
                 link,
                 link_for_pull,
+                checked_at,
             )
             services.append(c)
             log.info("Processed %s (%s)" % (c.service_name, c.image))
@@ -514,7 +527,7 @@ if __name__ == "__main__":
         if args.table:
             [tbl[i].append(str(v)) for (i,v) in enumerate(c.as_table_row)]
         if args.json:
-            jsonout.append(c.as_output_dict)
+            jsonout.append(c.as_output_dict(args.json_timestamps))
 
     if args.table:
         tbl_str = format_table(

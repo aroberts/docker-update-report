@@ -378,7 +378,8 @@ if __name__ == "__main__":
                 labelname = "com.docker.stack.%s" % l
                 extracted_labels[l] = inspect_res['labels'].get(labelname)
 
-            image_name = extracted_labels['image'].split(":")[0]
+            # extract image name for later, handling sha-specified pins
+            image_name = re.sub(r"@sha256", "", extracted_labels['image'].split(":")[0])
 
             # this may fail due to docker rate-limiting
             skopeo_cmd = ["skopeo", "inspect", "docker://%s" % extracted_labels['image']]

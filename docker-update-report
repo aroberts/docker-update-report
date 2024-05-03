@@ -458,7 +458,7 @@ if __name__ == "__main__":
 
                     if include_tags:
                         try:
-                            link_for_pull = include_tags.sub(link_template, current_tag)
+                            link_for_pull = include_tags.sub(current_tag, link_template)
                         except Exception as e:
                             log.error("Error rendering pull link for '%s': %s" % (image_name, str(e)))
                             link_for_pull = link_template

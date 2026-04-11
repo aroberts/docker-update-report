@@ -87,6 +87,36 @@ limit](https://www.docker.com/blog/checking-your-current-docker-pull-rate-limits
 - delay before retrying after failures via `--failure-delay` (in seconds)
 
 
+## Supply chain cooldown
+
+As a defense against supply chain attacks, `docker-update-report` can enforce
+a cooldown period before reporting a new tag as an available update. When
+enabled, a tag must have been published for at least `cooldown_days` before
+the tool will surface it. This gives the community time to vet new releases —
+compromised packages are typically detected and pulled well within a month.
+
+The cooldown is opt-in and disabled by default. Enable it globally with
+`--cooldown-days N`, or override it for a single service with the
+`dur.cooldown_days=<int>` label. A value of `0` disables the cooldown.
+
+### Behavior
+
+- If the latest tag is past cooldown → report it as usual.
+- If the latest tag is still in cooldown → suppress it and log the remaining
+  time at `info`.
+- If the tag's publish timestamp (skopeo's `Created` field) is missing or
+  unparseable → suppress it and log at `error` (fail-safe).
+
+The cooldown check runs after tag version comparison but before the digest
+deduplication step, and reuses the existing `skopeo inspect` call for the
+candidate tag, so it adds no extra requests against the registry.
+
+Note that `Created` reflects when the image manifest was built, not
+necessarily when it was pushed to the registry. For virtually all registries
+these are effectively the same, but be aware of the distinction if you are
+tracking images that get rebuilt and retagged out of band.
+
+
 ## Motivation
 
 I needed an alternative to the hindsight-oriented update strategy that seems to

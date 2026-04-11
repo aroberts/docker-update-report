@@ -23,7 +23,7 @@ from typing import Callable, List, Optional, Sequence
 
 from pprint import pp
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 # sentinel for comparison only
 STDOUT=object()
@@ -184,6 +184,29 @@ def version_string_to_semver_tuple(version):
         return (a, b, c, d if d else 'zzzzzzzzzzz')
     return None
 
+def parse_published_at(s):
+    if not isinstance(s, str) or not s:
+        return None
+    try:
+        # Normalize Z suffix
+        if s.endswith('Z'):
+            s = s[:-1] + '+00:00'
+        # Truncate fractional seconds beyond microseconds (skopeo may emit nanos)
+        if '.' in s:
+            dot = s.index('.')
+            end = dot + 1
+            while end < len(s) and s[end].isdigit():
+                end += 1
+            frac = s[dot+1:end]
+            if len(frac) > 6:
+                s = s[:dot+1] + frac[:6] + s[end:]
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
 def trueish(val):
     tst = str(val).lower()
     if tst in ["true", "t", "1", "y", "yes"]:
@@ -239,6 +262,8 @@ if __name__ == "__main__":
             string will be applied according to the capture groups from the newest tag.
             Use \\1, \\2, etc for numbered capture groups and \g<name> for named
             capture groups.
+        dur.cooldown_days=<int>
+            Per-service override for --cooldown-days.
     """
     )
 
@@ -274,6 +299,11 @@ if __name__ == "__main__":
                             help="ignore container labels, only use command line options")
     parser.add_argument("-k", "--link-template", metavar="STR",
                             help="template for creating links from tag matches. Override with container label 'dur.link.template'")
+    parser.add_argument("--cooldown-days", metavar="N", type=int, default=0,
+                            help="""supply chain cooldown: suppress proposing
+                            a new tag until it has been published for at least
+                            this many days. 0 disables the cooldown (default).
+                            Override per-service with label 'dur.cooldown_days'""")
 
     parser.add_argument("--table", metavar="PATH", nargs='?', const=STDOUT,
                             help="output results as table, to either STDOUT or a provided path")
@@ -406,11 +436,20 @@ if __name__ == "__main__":
             remote_repo_digest = skopeo_inspect_res.get('Digest')
 
             label_include_tags, label_exclude_tags, label_parse_numeric, label_link_template = (None, None, None, None)
+            label_cooldown_days = None
             if not args.ignore_labels:
                 label_include_tags = inspect_res.get('labels', {}).get("dur.tags.include")
                 label_exclude_tags = inspect_res.get('labels', {}).get("dur.tags.exclude")
                 label_parse_numeric = not trueish(inspect_res.get('labels', {}).get("dur.tags.parse_numeric"))
                 label_link_template = inspect_res.get('labels', {}).get("dur.link.template")
+                raw_cooldown = inspect_res.get('labels', {}).get("dur.cooldown_days")
+                if raw_cooldown is not None:
+                    try:
+                        label_cooldown_days = int(raw_cooldown)
+                    except ValueError:
+                        log.warning("Invalid dur.cooldown_days=%r on %s, using default" % (raw_cooldown, inspect_res['name']))
+
+            cooldown_days = label_cooldown_days if label_cooldown_days is not None else args.cooldown_days
 
             link_template = label_link_template if label_link_template else args.link_template
             include_tags = re.compile(label_include_tags) if label_include_tags else global_include_tags
@@ -481,10 +520,26 @@ if __name__ == "__main__":
                 skopeo_cmd = ["skopeo", "inspect", "docker://%s:%s" % (image_name, biggest_tag_name)]
                 try:
                     skopeo_tag_inspect_res = json.loads(run_get(skopeo_cmd))
-                    biggest_tag_digest = skopeo_tag_inspect_res.get('Digest')
-                    if biggest_tag_digest == repo_digest:
-                        log.info("Saw tag %s for %s - same digest, ignoring..." % (biggest_tag_name, extracted_labels['image']))
-                        biggest_tag_name = None
+
+                    # supply chain cooldown check - suppress tags that haven't
+                    # been public long enough for the community to vet them
+                    if cooldown_days > 0:
+                        published_at = parse_published_at(skopeo_tag_inspect_res.get('Created'))
+                        if published_at is None:
+                            log.error("Skipping %s:%s - published_at missing/unparseable (fail-safe)" % (image_name, biggest_tag_name))
+                            biggest_tag_name = None
+                        else:
+                            age_days = (datetime.now(timezone.utc) - published_at).total_seconds() / 86400
+                            if age_days < cooldown_days:
+                                remaining = cooldown_days - age_days
+                                log.info("Skipping %s:%s - in cooldown, %.1f days remaining" % (image_name, biggest_tag_name, remaining))
+                                biggest_tag_name = None
+
+                    if biggest_tag_name:
+                        biggest_tag_digest = skopeo_tag_inspect_res.get('Digest')
+                        if biggest_tag_digest == repo_digest:
+                            log.info("Saw tag %s for %s - same digest, ignoring..." % (biggest_tag_name, extracted_labels['image']))
+                            biggest_tag_name = None
                 except subprocess.CalledProcessError:
                     extra_failure_str = " (failure %d of %d)" % (attempt+1, args.max_attempts) if args.max_attempts > 1 else ""
                     log.warning("skopeo failure: `%s`%s" % (" ".join(skopeo_cmd), extra_failure_str))

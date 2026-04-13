@@ -165,7 +165,7 @@ def run_get(argv):
 def grouped(iterable, key=None):
     return itertools.groupby(sorted(iterable, key=key), key)
 
-semver_regex = re.compile("^v?([0-9]+)\.([0-9]+)(?:\.([0-9]+))?(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+)?")
+semver_regex = re.compile(r"^v?([0-9]+)\.([0-9]+)(?:\.([0-9]+))?(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+)?")
 numbers_regex = re.compile("^[0-9]+$")
 def version_string_to_semver_tuple(version):
     res = semver_regex.search(version)
@@ -260,7 +260,7 @@ if __name__ == "__main__":
             URL to attach to this container's output. If an include regex is
             used globally or for this container, then replacements provided in this
             string will be applied according to the capture groups from the newest tag.
-            Use \\1, \\2, etc for numbered capture groups and \g<name> for named
+            Use \\1, \\2, etc for numbered capture groups and \\g<name> for named
             capture groups.
         dur.cooldown_days=<int>
             Per-service override for --cooldown-days.

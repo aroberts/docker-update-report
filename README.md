@@ -41,33 +41,55 @@ APIs.
 ## Usage
 ```
 usage: docker-update-report [-h] [-d DELAY] [-f DELAY] [-m N] [-v] [-q]
-                            [-c PATH] [-o [ID ...]] [--table [PATH]]
+                            [-c PATH] [-i REGEX] [-e REGEX] [-n] [-l] [-k STR]
+                            [--cooldown-days N] [--table [PATH]]
                             [--table-max-width N] [--json [PATH]]
+                            [--json-timestamps]
+                            [service_ids ...]
 
-A utility for inspecting docker-compose stacks against their source image
-hashes and tags, and determining what needs updates.
+positional arguments:
+  service_ids           restrict tool to only these service ids
 
-optional arguments:
+options:
   -h, --help            show this help message and exit
-  -d DELAY, --delay DELAY
-                        delay in seconds between container inspections
-  -f DELAY, --failure-delay DELAY
+  -d, --delay DELAY     delay in seconds between service inspections
+  -f, --failure-delay DELAY
                         delay after encountering a docker rate limit [500s]
-  -m N, --max-attempts N
-                        Fail after this many errors
+  -m, --max-attempts N  Fail after this many errors
   -v, --verbose         more logging (or -vv, etc)
   -q, --quiet           less logging
-  -c PATH, --repo-credentials PATH
+  -c, --repo-credentials PATH
                         a file containing credentials for use with `docker
                         login` in the format of `user:password` (only the
                         first line will be read)
-  -o [ID ...], --only [ID ...]
-                        restrict tool to only these container ids
+  -i, --include-tags REGEX
+                        only tags matching this regex will be considered. This
+                        can be overridden per-service with the label
+                        'dur.tags.include'. If this regex has capture groups,
+                        they will be used to sort the tags. If named capture
+                        groups are used, the sort will be in alphabetical
+                        order
+  -e, --exclude-tags REGEX
+                        only tags matching this regex will be considered. This
+                        can be overridden per-service with the label
+                        'dur.tags.exclude'
+  -n, --no-parse-numerics
+                        don't attempt to parse numeric tag parts
+  -l, --ignore-labels   ignore container labels, only use command line options
+  -k, --link-template STR
+                        template for creating links from tag matches. Override
+                        with container label 'dur.link.template'
+  --cooldown-days N     supply chain cooldown: suppress proposing a new tag
+                        until it has been published for at least this many
+                        days. 0 disables the cooldown (default). Override per-
+                        service with label 'dur.cooldown_days'
   --table [PATH]        output results as table, to either STDOUT or a
                         provided path
   --table-max-width N   max width of table columns [50]
   --json [PATH]         output results as json, to either STDOUT or a provided
                         path
+  --json-timestamps     add a `checked_at` timestamp field to each row of json
+                        output
 ```
 
 Because of the docker-compose dependency, and the way compose information is

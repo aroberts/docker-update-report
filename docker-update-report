@@ -81,7 +81,7 @@ class Service:
     repo_digest: str
     remote_repo_digest: str
     biggest_tag: str
-    latest_in_cooldown: Optional[str]
+    cooldowns: List[dict]
     link: str
     link_for_pull: str
     checked_at: str
@@ -95,7 +95,7 @@ class Service:
             "image",
             "pull",
             "tag",
-            "cooldown",
+            "cooldowns",
             "link",
         ]
 
@@ -108,18 +108,26 @@ class Service:
             self.image,
             self.has_new_image_for_tag,
             self.biggest_tag if self.has_new_tag else self.has_new_tag,
-            self.latest_in_cooldown,
+            self._cooldowns_display(),
             self.link if self.has_new_tag else (self.link_for_pull if self.has_new_image_for_tag else None)
         ]
 
+    def _cooldowns_display(self):
+        if not self.cooldowns:
+            return None
+        def fmt(e):
+            r = e["remaining_days"]
+            return f"{e['tag']} (?)" if r is None else f"{e['tag']} ({r:.1f}d)"
+        return ", ".join(fmt(e) for e in self.cooldowns)
+
     def as_output_dict(self, include_checked_at):
+        # table and json schemas are otherwise identical, but 'cooldowns' is
+        # flattened to a string for the table and kept structured for json
+        d = dict(zip(Service.headers(), self.as_table_row))
+        d["cooldowns"] = self.cooldowns
         if include_checked_at:
-            return dict(zip(
-                Service.headers() + ["checked_at"],
-                self.as_table_row + [self.checked_at]
-            ))
-        else:
-            return dict(zip(Service.headers(), self.as_table_row))
+            d["checked_at"] = self.checked_at
+        return d
 
     # these properties are deliberately nullable, with null representing an
     # indeterminate state
@@ -329,11 +337,12 @@ if __name__ == "__main__":
     parser.add_argument("--cooldown-fallthrough", action="store_true",
                             help="""if the newest tag is in cooldown, walk back
                             through older tags (up to 3) and recommend the
-                            newest one that is past cooldown. The in-cooldown
-                            tag is still reported in the 'cooldown' output
-                            field. Off by default (strict: in-cooldown newest
-                            tag suppresses recommendation entirely). Override
-                            per-service with label 'dur.cooldown_fallthrough'""")
+                            newest one that is past cooldown. Any in-cooldown
+                            tags encountered along the way are still reported
+                            in the 'cooldowns' output field. Off by default
+                            (strict: in-cooldown newest tag suppresses
+                            recommendation entirely). Override per-service
+                            with label 'dur.cooldown_fallthrough'""")
 
     parser.add_argument("--table", metavar="PATH", nargs='?', const=STDOUT,
                             help="output results as table, to either STDOUT or a provided path")
@@ -476,7 +485,7 @@ if __name__ == "__main__":
                         repo_digest,
                         None,  # remote_repo_digest
                         None,  # biggest_tag
-                        None,  # latest_in_cooldown
+                        [],    # cooldowns
                         None,  # link
                         None,  # link_for_pull
                         checked_at,
@@ -513,7 +522,7 @@ if __name__ == "__main__":
 
             cooldown_days = label_cooldown_days if label_cooldown_days is not None else args.cooldown_days
             cooldown_fallthrough = label_cooldown_fallthrough if label_cooldown_fallthrough is not None else args.cooldown_fallthrough
-            latest_in_cooldown = None
+            cooldowns = []
 
             link_template = label_link_template if label_link_template else args.link_template
             include_tags = re.compile(label_include_tags) if label_include_tags else global_include_tags
@@ -624,15 +633,13 @@ if __name__ == "__main__":
                         published_at = parse_published_at(skopeo_tag_inspect_res.get('Created'))
                         if published_at is None:
                             log.error("Skipping %s:%s - published_at missing/unparseable (fail-safe)" % (image_name, candidate_name))
-                            if latest_in_cooldown is None:
-                                latest_in_cooldown = candidate_name
+                            cooldowns.append({"tag": candidate_name, "remaining_days": None})
                             continue
                         age_days = (datetime.now(timezone.utc) - published_at).total_seconds() / 86400
                         if age_days < cooldown_days:
                             remaining = cooldown_days - age_days
                             log.info("Skipping %s:%s - in cooldown, %.1f days remaining" % (image_name, candidate_name, remaining))
-                            if latest_in_cooldown is None:
-                                latest_in_cooldown = candidate_name
+                            cooldowns.append({"tag": candidate_name, "remaining_days": round(remaining, 1)})
                             continue
 
                     # past cooldown - check digest (don't fall through further; same image
@@ -668,7 +675,7 @@ if __name__ == "__main__":
                 repo_digest,
                 remote_repo_digest,
                 biggest_tag_name,
-                latest_in_cooldown,
+                cooldowns,
                 link,
                 link_for_pull,
                 checked_at,

@@ -86,11 +86,12 @@ options:
   --cooldown-fallthrough
                         if the newest tag is in cooldown, walk back through
                         older tags (up to 3) and recommend the newest one that
-                        is past cooldown. The in-cooldown tag is still
-                        reported in the 'cooldown' output field. Off by
-                        default (strict: in-cooldown newest tag suppresses
-                        recommendation entirely). Override per-service with
-                        label 'dur.cooldown_fallthrough'
+                        is past cooldown. Any in-cooldown tags encountered
+                        along the way are still reported in the 'cooldowns'
+                        output field. Off by default (strict: in-cooldown
+                        newest tag suppresses recommendation entirely).
+                        Override per-service with label
+                        'dur.cooldown_fallthrough'
   --table [PATH]        output results as table, to either STDOUT or a
                         provided path
   --table-max-width N   max width of table columns [50]
@@ -143,9 +144,21 @@ cooldown. Pass `--cooldown-fallthrough` (or set
 `dur.cooldown_fallthrough=true` on the service) to walk back through older
 tags (up to 3 attempts) and recommend the newest one that is past cooldown.
 
-Regardless of mode, output includes a `cooldown` field (column in `--table`,
-key in `--json`) that reports the newest in-cooldown tag encountered, or
-`null` if none.
+Regardless of mode, output includes a `cooldowns` field (column in `--table`,
+key in `--json`) listing every in-cooldown tag encountered during the walk,
+along with how much of its cooldown remains:
+
+- In `--json`, `cooldowns` is a list of objects:
+  `[{"tag": "v1.2.3", "remaining_days": 2.1}, ...]`. Empty list if none were
+  encountered. `remaining_days` is `null` when the tag's publish timestamp
+  could not be parsed (fail-safe: still treated as in cooldown).
+- In `--table`, the same information is flattened to a single cell as
+  `v1.2.3 (2.1d), v1.2.2 (1.3d)`. An unknown remaining period renders as
+  `(?)`. Empty renders as `None`.
+
+Without `--cooldown-fallthrough`, the walk stops at the first candidate, so
+at most one entry will appear. With fallthrough enabled, up to 3 entries may
+appear (one per candidate inspected before a past-cooldown tag is found).
 
 Note that `Created` reflects when the image manifest was built, not
 necessarily when it was pushed to the registry. For virtually all registries

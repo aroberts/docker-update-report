@@ -42,9 +42,9 @@ APIs.
 ```
 usage: docker-update-report [-h] [-d DELAY] [-f DELAY] [-m N] [-v] [-q]
                             [-c PATH] [-i REGEX] [-e REGEX] [-n] [-l] [-k STR]
-                            [--cooldown-days N] [--table [PATH]]
-                            [--table-max-width N] [--json [PATH]]
-                            [--json-timestamps]
+                            [--cooldown-days N] [--cooldown-fallthrough]
+                            [--table [PATH]] [--table-max-width N]
+                            [--json [PATH]] [--json-timestamps]
                             [service_ids ...]
 
 positional arguments:
@@ -83,6 +83,14 @@ options:
                         until it has been published for at least this many
                         days. 0 disables the cooldown (default). Override per-
                         service with label 'dur.cooldown_days'
+  --cooldown-fallthrough
+                        if the newest tag is in cooldown, walk back through
+                        older tags (up to 3) and recommend the newest one that
+                        is past cooldown. The in-cooldown tag is still
+                        reported in the 'cooldown' output field. Off by
+                        default (strict: in-cooldown newest tag suppresses
+                        recommendation entirely). Override per-service with
+                        label 'dur.cooldown_fallthrough'
   --table [PATH]        output results as table, to either STDOUT or a
                         provided path
   --table-max-width N   max width of table columns [50]
@@ -129,9 +137,15 @@ The cooldown is opt-in and disabled by default. Enable it globally with
 - If the tag's publish timestamp (skopeo's `Created` field) is missing or
   unparseable → suppress it and log at `error` (fail-safe).
 
-The cooldown check runs after tag version comparison but before the digest
-deduplication step, and reuses the existing `skopeo inspect` call for the
-candidate tag, so it adds no extra requests against the registry.
+Suppression is strict by default: if a newer tag exists but is still cooling,
+the tool does not recommend any upgrade, even to an older tag that is past
+cooldown. Pass `--cooldown-fallthrough` (or set
+`dur.cooldown_fallthrough=true` on the service) to walk back through older
+tags (up to 3 attempts) and recommend the newest one that is past cooldown.
+
+Regardless of mode, output includes a `cooldown` field (column in `--table`,
+key in `--json`) that reports the newest in-cooldown tag encountered, or
+`null` if none.
 
 Note that `Created` reflects when the image manifest was built, not
 necessarily when it was pushed to the registry. For virtually all registries

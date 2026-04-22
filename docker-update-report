@@ -81,6 +81,7 @@ class Service:
     repo_digest: str
     remote_repo_digest: str
     biggest_tag: str
+    latest_in_cooldown: Optional[str]
     link: str
     link_for_pull: str
     checked_at: str
@@ -94,6 +95,7 @@ class Service:
             "image",
             "pull",
             "tag",
+            "cooldown",
             "link",
         ]
 
@@ -106,6 +108,7 @@ class Service:
             self.image,
             self.has_new_image_for_tag,
             self.biggest_tag if self.has_new_tag else self.has_new_tag,
+            self.latest_in_cooldown,
             self.link if self.has_new_tag else (self.link_for_pull if self.has_new_image_for_tag else None)
         ]
 
@@ -264,6 +267,8 @@ if __name__ == "__main__":
             capture groups.
         dur.cooldown_days=<int>
             Per-service override for --cooldown-days.
+        dur.cooldown_fallthrough=true/false
+            Per-service override for --cooldown-fallthrough.
     """
     )
 
@@ -304,6 +309,14 @@ if __name__ == "__main__":
                             a new tag until it has been published for at least
                             this many days. 0 disables the cooldown (default).
                             Override per-service with label 'dur.cooldown_days'""")
+    parser.add_argument("--cooldown-fallthrough", action="store_true",
+                            help="""if the newest tag is in cooldown, walk back
+                            through older tags (up to 3) and recommend the
+                            newest one that is past cooldown. The in-cooldown
+                            tag is still reported in the 'cooldown' output
+                            field. Off by default (strict: in-cooldown newest
+                            tag suppresses recommendation entirely). Override
+                            per-service with label 'dur.cooldown_fallthrough'""")
 
     parser.add_argument("--table", metavar="PATH", nargs='?', const=STDOUT,
                             help="output results as table, to either STDOUT or a provided path")
@@ -437,6 +450,7 @@ if __name__ == "__main__":
 
             label_include_tags, label_exclude_tags, label_parse_numeric, label_link_template = (None, None, None, None)
             label_cooldown_days = None
+            label_cooldown_fallthrough = None
             if not args.ignore_labels:
                 label_include_tags = inspect_res.get('labels', {}).get("dur.tags.include")
                 label_exclude_tags = inspect_res.get('labels', {}).get("dur.tags.exclude")
@@ -448,8 +462,15 @@ if __name__ == "__main__":
                         label_cooldown_days = int(raw_cooldown)
                     except ValueError:
                         log.warning("Invalid dur.cooldown_days=%r on %s, using default" % (raw_cooldown, inspect_res['name']))
+                raw_fallthrough = inspect_res.get('labels', {}).get("dur.cooldown_fallthrough")
+                if raw_fallthrough is not None:
+                    label_cooldown_fallthrough = trueish(raw_fallthrough)
+                    if label_cooldown_fallthrough is None:
+                        log.warning("Invalid dur.cooldown_fallthrough=%r on %s, using default" % (raw_fallthrough, inspect_res['name']))
 
             cooldown_days = label_cooldown_days if label_cooldown_days is not None else args.cooldown_days
+            cooldown_fallthrough = label_cooldown_fallthrough if label_cooldown_fallthrough is not None else args.cooldown_fallthrough
+            latest_in_cooldown = None
 
             link_template = label_link_template if label_link_template else args.link_template
             include_tags = re.compile(label_include_tags) if label_include_tags else global_include_tags
@@ -517,36 +538,71 @@ if __name__ == "__main__":
             # make sure we're not getting notice of updates to e.g. 7.0.1 when
             # already on the latest 7.0 tag
             if biggest_tag_name and biggest_tag_name != current_tag:
-                skopeo_cmd = ["skopeo", "inspect", "docker://%s:%s" % (image_name, biggest_tag_name)]
-                try:
-                    skopeo_tag_inspect_res = json.loads(run_get(skopeo_cmd))
+                FALLTHROUGH_LIMIT = 3
+                candidates_to_try = sorted_tags[:FALLTHROUGH_LIMIT] if cooldown_fallthrough else sorted_tags[:1]
+
+                final_tag = None
+                rate_limit_hit = False
+
+                for candidate in candidates_to_try:
+                    candidate_name = candidate['raw']
+
+                    # walked down to the deployed tag - nothing newer is acceptable
+                    if candidate_name == current_tag:
+                        break
+
+                    skopeo_cmd = ["skopeo", "inspect", "docker://%s:%s" % (image_name, candidate_name)]
+                    try:
+                        skopeo_tag_inspect_res = json.loads(run_get(skopeo_cmd))
+                    except subprocess.CalledProcessError:
+                        extra_failure_str = " (failure %d of %d)" % (attempt+1, args.max_attempts) if args.max_attempts > 1 else ""
+                        log.warning("skopeo failure: `%s`%s" % (" ".join(skopeo_cmd), extra_failure_str))
+                        if attempt+1 < args.max_attempts:
+                            log.info(f"Pausing {args.failure_delay}s after rate limit failure...")
+                            time.sleep(args.failure_delay)
+                        rate_limit_hit = True
+                        break
 
                     # supply chain cooldown check - suppress tags that haven't
                     # been public long enough for the community to vet them
                     if cooldown_days > 0:
                         published_at = parse_published_at(skopeo_tag_inspect_res.get('Created'))
                         if published_at is None:
-                            log.error("Skipping %s:%s - published_at missing/unparseable (fail-safe)" % (image_name, biggest_tag_name))
-                            biggest_tag_name = None
-                        else:
-                            age_days = (datetime.now(timezone.utc) - published_at).total_seconds() / 86400
-                            if age_days < cooldown_days:
-                                remaining = cooldown_days - age_days
-                                log.info("Skipping %s:%s - in cooldown, %.1f days remaining" % (image_name, biggest_tag_name, remaining))
-                                biggest_tag_name = None
+                            log.error("Skipping %s:%s - published_at missing/unparseable (fail-safe)" % (image_name, candidate_name))
+                            if latest_in_cooldown is None:
+                                latest_in_cooldown = candidate_name
+                            continue
+                        age_days = (datetime.now(timezone.utc) - published_at).total_seconds() / 86400
+                        if age_days < cooldown_days:
+                            remaining = cooldown_days - age_days
+                            log.info("Skipping %s:%s - in cooldown, %.1f days remaining" % (image_name, candidate_name, remaining))
+                            if latest_in_cooldown is None:
+                                latest_in_cooldown = candidate_name
+                            continue
 
-                    if biggest_tag_name:
-                        biggest_tag_digest = skopeo_tag_inspect_res.get('Digest')
-                        if biggest_tag_digest == repo_digest:
-                            log.info("Saw tag %s for %s - same digest, ignoring..." % (biggest_tag_name, extracted_labels['image']))
-                            biggest_tag_name = None
-                except subprocess.CalledProcessError:
-                    extra_failure_str = " (failure %d of %d)" % (attempt+1, args.max_attempts) if args.max_attempts > 1 else ""
-                    log.warning("skopeo failure: `%s`%s" % (" ".join(skopeo_cmd), extra_failure_str))
-                    if attempt+1 < args.max_attempts:
-                        log.info(f"Pausing {args.failure_delay}s after rate limit failure...")
-                        time.sleep(args.failure_delay)
+                    # past cooldown - check digest (don't fall through further; same image
+                    # across tags means there's nothing materially new to pull)
+                    if skopeo_tag_inspect_res.get('Digest') == repo_digest:
+                        log.info("Saw tag %s for %s - same digest, ignoring..." % (candidate_name, extracted_labels['image']))
+                        break
+
+                    final_tag = candidate
                     break
+
+                if rate_limit_hit:
+                    break
+
+                if final_tag:
+                    biggest_tag_name = final_tag['raw']
+                    if link_template and final_tag is not sorted_tags[0]:
+                        try:
+                            link = final_tag['match'].expand(link_template)
+                        except Exception as e:
+                            log.error("Error rendering link for '%s': %s" % (image_name, str(e)))
+                            link = None
+                else:
+                    biggest_tag_name = None
+                    link = None
 
             shortname = inspect_res['name'][len(extracted_labels['namespace'])+1:] if 'namespace' in extracted_labels else None
 
@@ -559,6 +615,7 @@ if __name__ == "__main__":
                 repo_digest,
                 remote_repo_digest,
                 biggest_tag_name,
+                latest_in_cooldown,
                 link,
                 link_for_pull,
                 checked_at,

@@ -135,7 +135,7 @@ class Service:
                 else:
                     # hamfisted; parse didn't work so revert to pure lexical
                     return self.biggest_tag > local
-            except:
+            except (IndexError, TypeError):
                 return None
         return None
 
@@ -160,9 +160,26 @@ def go_formatstr(input_dict, modifier=None):
 
 def run_get(argv):
     log.debug("Running command: %s" % ' '.join(argv))
-    res = subprocess.check_output(argv, text=True).strip()
-    log.debug(res)
-    return res
+    res = subprocess.run(argv, capture_output=True, text=True, check=True)
+    log.debug(res.stdout)
+    return res.stdout.strip()
+
+# stderr fragments that indicate a non-retriable skopeo failure - the service
+# should be skipped, not retried after a rate-limit cooldown
+FATAL_SKOPEO_PATTERNS = (
+    "403 (forbidden)",
+    "404 (not found)",
+    "401 (unauthorized)",
+    "manifest unknown",
+    "name unknown",
+    "repository name not known",
+)
+
+def is_fatal_skopeo_error(stderr):
+    if not stderr:
+        return False
+    lower = stderr.lower()
+    return any(p in lower for p in FATAL_SKOPEO_PATTERNS)
 
 
 def grouped(iterable, key=None):
@@ -181,7 +198,7 @@ def version_string_to_semver_tuple(version):
             a = int(a) if a else 0
             b = int(b) if b else 0
             c = int(c) if c else 0
-        except:
+        except (ValueError, TypeError):
             return None
 
         return (a, b, c, d if d else 'zzzzzzzzzzz')
@@ -424,27 +441,53 @@ if __name__ == "__main__":
             # extract image name for later, handling sha-specified pins
             image_name = re.sub(r"@sha256", "", extracted_labels['image'].split(":")[0])
 
-            # this may fail due to docker rate-limiting
+            # parse local image_spec up-front so the fatal-skopeo branch below
+            # can build a placeholder Service with what we know locally
+            image_spec_parts = inspect_res['image_spec'].split("@")
+            try:
+                repo_digest = image_spec_parts[1]
+            except IndexError:
+                repo_digest = None
+            try:
+                current_tag = image_spec_parts[0].split(":")[1]
+            except IndexError:
+                current_tag = None
+
+            shortname = inspect_res['name'][len(extracted_labels['namespace'])+1:] if 'namespace' in extracted_labels else None
+
+            # this may fail due to docker rate-limiting, or fatally if the image
+            # isn't published / accessible
             skopeo_cmd = ["skopeo", "inspect", "docker://%s" % extracted_labels['image']]
             try:
                 skopeo_inspect_res = json.loads(run_get(skopeo_cmd))
-            except subprocess.CalledProcessError:
+            except subprocess.CalledProcessError as e:
+                stderr = (e.stderr or "").strip()
+                last_line = stderr.splitlines()[-1] if stderr else "(no stderr)"
+                if is_fatal_skopeo_error(stderr):
+                    log.error("skopeo fatal error for %s, skipping service: %s" % (extracted_labels['image'], last_line))
+                    # record a placeholder so the outer retry loop won't
+                    # re-process this service on its next attempt
+                    services.append(Service(
+                        service_hash,
+                        inspect_res['name'],
+                        extracted_labels.get("namespace"),
+                        shortname,
+                        extracted_labels['image'],
+                        repo_digest,
+                        None,  # remote_repo_digest
+                        None,  # biggest_tag
+                        None,  # latest_in_cooldown
+                        None,  # link
+                        None,  # link_for_pull
+                        checked_at,
+                    ))
+                    continue
                 extra_failure_str = " (failure %d of %d)" % (attempt+1, args.max_attempts) if args.max_attempts > 1 else ""
-                log.warning("skopeo failure: `%s`%s" % (" ".join(skopeo_cmd), extra_failure_str))
+                log.warning("skopeo failure: `%s`%s - %s" % (" ".join(skopeo_cmd), extra_failure_str, last_line))
                 if attempt+1 < args.max_attempts:
                     log.info(f"Pausing {args.failure_delay}s after rate limit failure...")
                     time.sleep(args.failure_delay)
                 break
-
-            image_spec_parts = inspect_res['image_spec'].split("@")
-            try:
-                repo_digest = image_spec_parts[1]
-            except:
-                repo_digest = None
-            try:
-                current_tag = image_spec_parts[0].split(":")[1]
-            except:
-                current_tag = None
 
             remote_repo_digest = skopeo_inspect_res.get('Digest')
 
@@ -487,53 +530,60 @@ if __name__ == "__main__":
 
             parsed_tags = [ x for x in raw_parsed_tags if x is not None ]
 
-            try:
-                sorted_tags = sorted(
-                    parsed_tags,
-                    key=lambda x: (x['parsed'], len(x['raw'])),
-                    reverse = True
-                )
-
-                if log.getEffectiveLevel() <= logging.DEBUG:
-                    [
-                        log.debug("Found remote tag: %s:%s (parsed to %s)" % (
-                            image_name,
-                            st['raw'],
-                            repr(st['parsed']),
-                        ))
-                        for st in sorted_tags[::-1]
-                    ]
-
-                # TODO: extra step here- get the digest of the biggest tag and
-                # compare it to the current digest - don't report it as a new
-                # tag if they're the same
-                biggest_tag = sorted_tags[0]
-                biggest_tag_name = biggest_tag['raw']
-                if link_template:
-                    try:
-                        link = biggest_tag['match'].expand(link_template)
-                    except Exception as e:
-                        log.error("Error rendering link for '%s': %s" % (image_name, str(e)))
-                        link = None
-
-                    if include_tags:
-                        try:
-                            link_for_pull = include_tags.sub(current_tag, link_template)
-                        except Exception as e:
-                            log.error("Error rendering pull link for '%s': %s" % (image_name, str(e)))
-                            link_for_pull = link_template
-                    else:
-                        link_for_pull = link_template
-                else:
-                    link = None
-                    link_for_pull = None
-            except Exception as e:
-                log.error("Error sorting remote tags for '%s': %s" % (image_name, str(e)))
-                log.debug("Got these tags:")
-                [ log.debug("  " + repr(x)) for x in parsed_tags ]
+            if not parsed_tags:
+                log.warning("No usable remote tags for '%s' (RepoTags empty or fully filtered by include/exclude)" % image_name)
                 biggest_tag_name = None
                 link = None
                 link_for_pull = None
+            else:
+                try:
+                    sorted_tags = sorted(
+                        parsed_tags,
+                        key=lambda x: (x['parsed'], len(x['raw'])),
+                        reverse = True
+                    )
+
+                    if log.getEffectiveLevel() <= logging.DEBUG:
+                        [
+                            log.debug("Found remote tag: %s:%s (parsed to %s)" % (
+                                image_name,
+                                st['raw'],
+                                repr(st['parsed']),
+                            ))
+                            for st in sorted_tags[::-1]
+                        ]
+
+                    # TODO: extra step here- get the digest of the biggest tag and
+                    # compare it to the current digest - don't report it as a new
+                    # tag if they're the same
+                    biggest_tag = sorted_tags[0]
+                    biggest_tag_name = biggest_tag['raw']
+                    if link_template:
+                        try:
+                            link = biggest_tag['match'].expand(link_template)
+                        except (AttributeError, re.error) as e:
+                            log.error("Error rendering link for '%s': %s" % (image_name, str(e)))
+                            link = None
+
+                        if include_tags:
+                            try:
+                                link_for_pull = include_tags.sub(current_tag, link_template)
+                            except (TypeError, re.error) as e:
+                                log.error("Error rendering pull link for '%s': %s" % (image_name, str(e)))
+                                link_for_pull = link_template
+                        else:
+                            link_for_pull = link_template
+                    else:
+                        link = None
+                        link_for_pull = None
+                except TypeError as e:
+                    # sort blows up on mixed-type tag parsing (e.g. some tags parsed as ints, others as strs)
+                    log.error("Error sorting remote tags for '%s': %s" % (image_name, str(e)))
+                    log.debug("Got these tags:")
+                    [ log.debug("  " + repr(x)) for x in parsed_tags ]
+                    biggest_tag_name = None
+                    link = None
+                    link_for_pull = None
 
             # make sure we're not getting notice of updates to e.g. 7.0.1 when
             # already on the latest 7.0 tag
@@ -554,9 +604,14 @@ if __name__ == "__main__":
                     skopeo_cmd = ["skopeo", "inspect", "docker://%s:%s" % (image_name, candidate_name)]
                     try:
                         skopeo_tag_inspect_res = json.loads(run_get(skopeo_cmd))
-                    except subprocess.CalledProcessError:
+                    except subprocess.CalledProcessError as e:
+                        stderr = (e.stderr or "").strip()
+                        last_line = stderr.splitlines()[-1] if stderr else "(no stderr)"
+                        if is_fatal_skopeo_error(stderr):
+                            log.warning("skopeo fatal error for %s:%s, skipping candidate: %s" % (image_name, candidate_name, last_line))
+                            continue
                         extra_failure_str = " (failure %d of %d)" % (attempt+1, args.max_attempts) if args.max_attempts > 1 else ""
-                        log.warning("skopeo failure: `%s`%s" % (" ".join(skopeo_cmd), extra_failure_str))
+                        log.warning("skopeo failure: `%s`%s - %s" % (" ".join(skopeo_cmd), extra_failure_str, last_line))
                         if attempt+1 < args.max_attempts:
                             log.info(f"Pausing {args.failure_delay}s after rate limit failure...")
                             time.sleep(args.failure_delay)
@@ -603,8 +658,6 @@ if __name__ == "__main__":
                 else:
                     biggest_tag_name = None
                     link = None
-
-            shortname = inspect_res['name'][len(extracted_labels['namespace'])+1:] if 'namespace' in extracted_labels else None
 
             c = Service(
                 service_hash,

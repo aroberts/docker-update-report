@@ -627,6 +627,13 @@ if __name__ == "__main__":
                         rate_limit_hit = True
                         break
 
+                    # digest check first - if this candidate is just an alias
+                    # of the deployed image (e.g. `v1.2.3` vs `1.2.3`), there's
+                    # nothing materially new to pull, regardless of cooldown
+                    if skopeo_tag_inspect_res.get('Digest') == repo_digest:
+                        log.info("Saw tag %s for %s - same digest, ignoring..." % (candidate_name, extracted_labels['image']))
+                        break
+
                     # supply chain cooldown check - suppress tags that haven't
                     # been public long enough for the community to vet them
                     if cooldown_days > 0:
@@ -641,12 +648,6 @@ if __name__ == "__main__":
                             log.info("Skipping %s:%s - in cooldown, %.1f days remaining" % (image_name, candidate_name, remaining))
                             cooldowns.append({"tag": candidate_name, "remaining_days": round(remaining, 1)})
                             continue
-
-                    # past cooldown - check digest (don't fall through further; same image
-                    # across tags means there's nothing materially new to pull)
-                    if skopeo_tag_inspect_res.get('Digest') == repo_digest:
-                        log.info("Saw tag %s for %s - same digest, ignoring..." % (candidate_name, extracted_labels['image']))
-                        break
 
                     final_tag = candidate
                     break

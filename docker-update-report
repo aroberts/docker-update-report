@@ -109,7 +109,11 @@ class Service:
             self.has_new_image_for_tag,
             self.biggest_tag if self.has_new_tag else self.has_new_tag,
             self._cooldowns_display(),
-            self.link if self.has_new_tag else (self.link_for_pull if self.has_new_image_for_tag else None)
+            self.link if self.has_new_tag else (
+                self.link_for_pull if self.has_new_image_for_tag else (
+                    self.link if self.cooldowns else None
+                )
+            )
         ]
 
     def _cooldowns_display(self):
@@ -665,7 +669,11 @@ if __name__ == "__main__":
                             link = None
                 else:
                     biggest_tag_name = None
-                    link = None
+                    # keep `link` (rendered from sorted_tags[0] above) when
+                    # there are cooldown'd candidates, so cooldown-only rows
+                    # can still surface a release-notes URL
+                    if not cooldowns:
+                        link = None
 
             c = Service(
                 service_hash,

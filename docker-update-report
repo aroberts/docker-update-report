@@ -606,6 +606,7 @@ if __name__ == "__main__":
 
                 final_tag = None
                 rate_limit_hit = False
+                seen_digests = set()
 
                 for candidate in candidates_to_try:
                     candidate_name = candidate['raw']
@@ -631,12 +632,24 @@ if __name__ == "__main__":
                         rate_limit_hit = True
                         break
 
+                    candidate_digest = skopeo_tag_inspect_res.get('Digest')
+
                     # digest check first - if this candidate is just an alias
                     # of the deployed image (e.g. `v1.2.3` vs `1.2.3`), there's
                     # nothing materially new to pull, regardless of cooldown
-                    if skopeo_tag_inspect_res.get('Digest') == repo_digest:
+                    if candidate_digest == repo_digest:
                         log.info("Saw tag %s for %s - same digest, ignoring..." % (candidate_name, extracted_labels['image']))
                         break
+
+                    # dedupe: a previously-processed candidate had this same
+                    # digest (e.g. `v1.3.1` and `1.3.1` both point at a freshly
+                    # published image), so this one would just double-record
+                    if candidate_digest and candidate_digest in seen_digests:
+                        log.info("Saw tag %s for %s - same digest as previously-processed candidate, ignoring..." % (candidate_name, extracted_labels['image']))
+                        continue
+
+                    if candidate_digest:
+                        seen_digests.add(candidate_digest)
 
                     # supply chain cooldown check - suppress tags that haven't
                     # been public long enough for the community to vet them

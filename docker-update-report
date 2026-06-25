@@ -247,6 +247,15 @@ def trueish(val):
         return False
     return None
 
+def resolve_parse_numerics(label_value, no_parse_numerics):
+    # a recognized boolean label (dur.tags.parse_numeric) wins; otherwise fall
+    # through to the CLI flag, which leaves numeric parsing on unless
+    # --no-parse-numerics was passed
+    label = trueish(label_value)
+    if label is not None:
+        return label
+    return not no_parse_numerics
+
 def parse_tag(tag, include, exclude, numeric_groups=True):
     m = None
     if exclude and exclude.match(tag):
@@ -510,7 +519,7 @@ if __name__ == "__main__":
             if not args.ignore_labels:
                 label_include_tags = inspect_res.get('labels', {}).get("dur.tags.include")
                 label_exclude_tags = inspect_res.get('labels', {}).get("dur.tags.exclude")
-                label_parse_numeric = not trueish(inspect_res.get('labels', {}).get("dur.tags.parse_numeric"))
+                label_parse_numeric = inspect_res.get('labels', {}).get("dur.tags.parse_numeric")
                 label_link_template = inspect_res.get('labels', {}).get("dur.link.template")
                 raw_cooldown = inspect_res.get('labels', {}).get("dur.cooldown_days")
                 if raw_cooldown is not None:
@@ -531,7 +540,7 @@ if __name__ == "__main__":
             link_template = label_link_template if label_link_template else args.link_template
             include_tags = re.compile(label_include_tags) if label_include_tags else global_include_tags
             exclude_tags = re.compile(label_exclude_tags) if label_exclude_tags else global_exclude_tags
-            parse_numerics = label_parse_numeric if label_parse_numeric is not None else not args.no_parse_numerics
+            parse_numerics = resolve_parse_numerics(label_parse_numeric, args.no_parse_numerics)
             log.debug("Numeric parsing enabled: " + str(parse_numerics))
 
             raw_parsed_tags = [ parse_tag(

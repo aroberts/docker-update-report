@@ -1,4 +1,6 @@
-test*
+# scratchpad / run artifacts (real tests live in test_*.py)
+test.py
+test.out
 *.log
 
 __pycache__
